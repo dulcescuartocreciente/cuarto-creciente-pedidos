@@ -3,6 +3,8 @@ import hashlib
 import hmac
 import base64
 import sqlite3
+import secrets
+import requests
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -35,6 +37,38 @@ def check_password(password, stored):
         return False
 
 
+def hash_password(password):
+    salt = secrets.token_bytes(16)
+    rounds = 600000
+    derived = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, rounds)
+    return f"pbkdf2_sha256${rounds}${base64.b64encode(salt).decode()}${base64.b64encode(derived).decode()}"
+
+
+def remote_config():
+    try:
+        url = str(st.secrets.get('SUPABASE_URL', '')).rstrip('/')
+        key = str(st.secrets.get('SUPABASE_SERVICE_ROLE_KEY', ''))
+    except (KeyError, FileNotFoundError):
+        return None
+    return (url, key) if url.startswith('https://') and key else None
+
+
+def remote_users(method='GET', username=None, data=None):
+    cfg = remote_config()
+    if not cfg:
+        raise RuntimeError('Falta configurar SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY en Streamlit Secrets.')
+    url, key = cfg
+    endpoint = f'{url}/rest/v1/app_users'
+    params = {'select':'username,name,role,active,password_hash'} if method == 'GET' else {}
+    if username is not None:
+        params['username'] = f'eq.{username}'
+    headers = {'apikey':key,'Authorization':f'Bearer {key}', 'Content-Type':'application/json', 'Prefer':'return=minimal'}
+    response = requests.request(method, endpoint, params=params, json=data, headers=headers, timeout=12)
+    if not response.ok:
+        raise RuntimeError(f'No se pudo consultar o actualizar usuarios (HTTP {response.status_code}). Revisá la tabla y los Secrets.')
+    return response.json() if method == 'GET' else None
+
+
 def login():
     if st.session_state.get('authenticated'):
         return True
@@ -42,6 +76,9 @@ def login():
     left, center, right = st.columns([1, 1.8, 1])
     with center:
         show_logo()
+        imagen_ingreso = BASE / 'imagen_ingreso.jpg'
+        if imagen_ingreso.is_file():
+            st.image(str(imagen_ingreso), use_container_width=True)
         st.subheader('Acceso al sistema de pedidos')
         st.caption('Ingresá con tu usuario y contraseña')
         try:
@@ -54,7 +91,19 @@ def login():
             password = st.text_input('Contraseña', type='password')
             submitted = st.form_submit_button('Ingresar', use_container_width=True, type='primary')
         if submitted:
-            user = users.get(username)
+            user = None
+            if remote_config():
+                try:
+                    found = remote_users(username=username)
+                    if found:
+                        user = found[0] if found[0].get('active') else None
+                except RuntimeError as exc:
+                    st.error(str(exc))
+                    return False
+            if user is None and username == 'admin':
+                user = users.get('admin')
+            # Los vendedores se autentican exclusivamente contra la base compartida.
+
             if user and check_password(password, user.get('password_hash', '')) and user.get('role') in ('admin', 'vendedor'):
                 st.session_state.authenticated = True
                 st.session_state.username = username
@@ -164,7 +213,7 @@ def import_catalog(kind, file):
 init_db()
 now = datetime.now(TZ)
 st.caption(f'Fecha y hora (Argentina): {now:%d/%m/%Y %H:%M:%S} · Se actualiza al interactuar o recargar la página')
-page = st.sidebar.radio('Menú', ['Nuevo pedido','Pedidos guardados','Exportar Excel','Administración'] if st.session_state.role == 'admin' else ['Nuevo pedido','Mis pedidos'])
+page = st.sidebar.radio('Menú', ['Nuevo pedido','Pedidos guardados','Exportar Excel','Administración','Usuarios'] if st.session_state.role == 'admin' else ['Nuevo pedido','Mis pedidos'])
 
 if page == 'Nuevo pedido':
     st.header('Nuevo pedido')
@@ -281,6 +330,53 @@ elif page == 'Exportar Excel':
             data=excel_bytes({'Detalle pedidos':dff,'Matriz distribucion':matriz,'Totales articulos':totales,'Resumen clientes':resumen})
             st.download_button('⬇️ Descargar Excel de pedidos',data=data,file_name=f'pedidos_cuarto_creciente_{datetime.now(TZ):%Y%m%d_%H%M}.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',type='primary')
             st.warning('La estructura definitiva de la matriz se ajustará al archivo real que utiliza Distribución Inteligente.')
+
+elif page == 'Usuarios':
+    st.header('Administración de usuarios')
+    st.caption('Solo administradores pueden crear, desactivar y cambiar contraseñas de vendedores.')
+    if not remote_config():
+        st.warning('Para activar esta sección primero hay que conectar una base compartida. Seguí las instrucciones de INSTALACION_USUARIOS.md. El administrador actual sigue entrando por Secrets.')
+    else:
+        try:
+            registered = remote_users()
+            st.dataframe(pd.DataFrame([{'Usuario':u['username'],'Nombre':u['name'],'Rol':u['role'],'Activo':u['active']} for u in registered]), hide_index=True, use_container_width=True)
+            with st.form('create_user', clear_on_submit=True):
+                st.subheader('Crear vendedor')
+                new_name = st.text_input('Nombre y apellido')
+                new_username = st.text_input('Usuario (sin espacios)')
+                new_password = st.text_input('Contraseña inicial', type='password')
+                create = st.form_submit_button('Crear vendedor', type='primary')
+            if create:
+                un = new_username.strip().lower()
+                if not un or not un.replace('_','').isalnum() or not new_name.strip():
+                    st.error('Completá nombre y usuario. Usá letras, números o guion bajo.')
+                elif len(new_password) < 12:
+                    st.error('La contraseña debe tener al menos 12 caracteres.')
+                elif any(u['username'] == un for u in registered) or un == 'admin':
+                    st.error('Ese usuario ya existe.')
+                else:
+                    remote_users('POST', data={'username':un,'name':new_name.strip(),'role':'vendedor','active':True,'password_hash':hash_password(new_password)})
+                    st.success('Vendedor creado. Ya puede ingresar desde la pantalla principal.')
+                    st.rerun()
+            st.divider()
+            sellers = [u for u in registered if u['role'] == 'vendedor']
+            if sellers:
+                chosen = st.selectbox('Administrar vendedor', [u['username'] for u in sellers])
+                current = next(u for u in sellers if u['username'] == chosen)
+                if st.button('Desactivar usuario' if current['active'] else 'Reactivar usuario'):
+                    remote_users('PATCH', chosen, {'active':not current['active']})
+                    st.rerun()
+                with st.form('reset_password'):
+                    new_pass = st.text_input('Nueva contraseña para este vendedor',type='password')
+                    change = st.form_submit_button('Cambiar contraseña')
+                if change:
+                    if len(new_pass)<12:
+                        st.error('La contraseña debe tener al menos 12 caracteres.')
+                    else:
+                        remote_users('PATCH', chosen, {'password_hash':hash_password(new_pass)})
+                        st.success('Contraseña actualizada.')
+        except RuntimeError as exc:
+            st.error(str(exc))
 
 else:
     st.header('Administración de catálogos')
