@@ -72,15 +72,30 @@ def remote_users(method='GET', username=None, data=None):
 def login():
     if st.session_state.get('authenticated'):
         return True
-    st.markdown('<div style="height:2rem"></div>', unsafe_allow_html=True)
-    left, center, right = st.columns([1, 1.8, 1])
-    with center:
-        show_logo()
+    # Diseño compacto en dos columnas: imagen a la izquierda, formulario a la derecha.
+    st.markdown("""<style>
+      .block-container {padding-top: .55rem !important; padding-bottom: .5rem !important; max-width: 1100px !important;}
+      [data-testid="stVerticalBlock"] {gap: .55rem;}
+      [data-testid="stForm"] {padding: .75rem 1rem; border-radius: 14px;}
+      [data-testid="stForm"] [data-testid="stVerticalBlock"] {gap: .45rem;}
+      @media (max-width: 767px) {.block-container {padding-top: .35rem !important;}}
+    </style>""", unsafe_allow_html=True)
+    left, right = st.columns([1.12, 1], gap='large', vertical_alignment='center')
+    with left:
         imagen_ingreso = BASE / 'imagen_ingreso.jpg'
         if imagen_ingreso.is_file():
             st.image(str(imagen_ingreso), use_container_width=True)
+    with right:
+        logo = BASE / 'logo.png'
+        if not logo.is_file():
+            logo = BASE / 'assets' / 'logo.png'
+        if logo.is_file():
+            st.image(str(logo), width=340)
+        else:
+            st.title('Cuarto Creciente')
         st.subheader('Acceso al sistema de pedidos')
         st.caption('Ingresá con tu usuario y contraseña')
+        st.caption(datetime.now(TZ).strftime('Fecha: %d/%m/%Y · Hora: %H:%M (Argentina)'))
         try:
             users = st.secrets['users']
         except (KeyError, FileNotFoundError):
@@ -102,8 +117,6 @@ def login():
                     return False
             if user is None and username == 'admin':
                 user = users.get('admin')
-            # Los vendedores se autentican exclusivamente contra la base compartida.
-
             if user and check_password(password, user.get('password_hash', '')) and user.get('role') in ('admin', 'vendedor'):
                 st.session_state.authenticated = True
                 st.session_state.username = username
