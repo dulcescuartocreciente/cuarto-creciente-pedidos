@@ -62,8 +62,14 @@ def remote_users(method='GET', username=None, data=None):
     params = {'select':'username,name,role,active,password_hash'} if method == 'GET' else {}
     if username is not None:
         params['username'] = f'eq.{username}'
-    headers = {'apikey':key,'Authorization':f'Bearer {key}', 'Content-Type':'application/json', 'Prefer':'return=minimal'}
-    response = requests.request(method, endpoint, params=params, json=data, headers=headers, timeout=12)
+    # Las claves nuevas sb_secret_ no son JWT: no enviarlas como Bearer.
+    headers = {'apikey': key, 'Content-Type': 'application/json', 'Prefer': 'return=minimal'}
+    if not key.startswith('sb_secret_'):
+        headers['Authorization'] = f'Bearer {key}'
+    try:
+        response = requests.request(method, endpoint, params=params, json=data, headers=headers, timeout=12)
+    except requests.RequestException as exc:
+        raise RuntimeError('No se pudo conectar con Supabase. Revisá la conexión y la URL del proyecto.') from exc
     if not response.ok:
         raise RuntimeError(f'No se pudo consultar o actualizar usuarios (HTTP {response.status_code}). Revisá la tabla y los Secrets.')
     return response.json() if method == 'GET' else None
@@ -106,17 +112,22 @@ def login():
             password = st.text_input('Contraseña', type='password')
             submitted = st.form_submit_button('Ingresar', use_container_width=True, type='primary')
         if submitted:
+            # El administrador local siempre se autentica con Secrets.
+            # Un fallo remoto nunca debe impedirle entrar a corregir la conexión.
             user = None
-            if remote_config():
+            remote_failed = False
+            if username == 'admin':
+                user = users.get('admin')
+            elif remote_config():
                 try:
                     found = remote_users(username=username)
-                    if found:
-                        user = found[0] if found[0].get('active') else None
+                    if found and found[0].get('active'):
+                        user = found[0]
                 except RuntimeError as exc:
                     st.error(str(exc))
-                    return False
-            if user is None and username == 'admin':
-                user = users.get('admin')
+                    remote_failed = True
+            if remote_failed:
+                return False
             if user and check_password(password, user.get('password_hash', '')) and user.get('role') in ('admin', 'vendedor'):
                 st.session_state.authenticated = True
                 st.session_state.username = username
