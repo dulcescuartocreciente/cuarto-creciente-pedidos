@@ -1,27 +1,21 @@
-# Cuarto Creciente · Pedidos Streamlit V1
+# Cuarto Creciente Pedidos — Streamlit V1 con acceso de usuarios
 
-## Ejecutar localmente
+## Archivos para GitHub
+Subí `app.py`, `requirements.txt`, `generar_hash.py`, `logo.png` y `.gitignore` a la raíz del repositorio. Si tu logo está en `assets/logo.png`, también funciona. No subas `pedidos.db` ni archivos con contraseñas.
 
-1. Instalar Python 3.10 o superior.
-2. Abrir una terminal en esta carpeta.
-3. Ejecutar `pip install -r requirements.txt`.
-4. Ejecutar `streamlit run app.py`.
-5. Abrir la dirección local indicada (normalmente http://localhost:8501).
+## Crear las contraseñas
+En tu computadora, con Python instalado, ejecutá `python generar_hash.py`. Ingresá una contraseña de 12 caracteres o más y copiá el hash generado. Repetí el procedimiento para cada usuario.
 
-## Primer uso
+## Configurar Streamlit Cloud
+Abrí tu app > Manage app > Settings > Secrets. Copiá la estructura de `secrets.ejemplo.toml`, reemplazá cada `PEGAR_HASH_GENERADO_AQUI` por su hash y guardá. **No subas el archivo de secrets con contraseñas a GitHub**. Los usuarios se identifican por las secciones `[users.nombredeusuario]` en minúsculas. Roles permitidos: `admin` y `vendedor`.
 
-1. Ir a **Administración** y descargar las plantillas de clientes y artículos.
-2. Completar los códigos como texto. `lista` debe decir `Lista 1`, `Lista 2` o `Lista 3`.
-3. Importar ambos Excel. Los registros se actualizan por código sin borrar otros registros.
-4. Ir a **Nuevo pedido**, seleccionar cliente, ingresar vendedor, cargar artículos y guardar.
-5. En **Exportar Excel**, elegir estados y descargar un archivo con detalle, matriz, totales y resumen.
+## Permisos
+- Administrador: carga de pedidos, historial completo, edición, importación de clientes/artículos y exportación Excel.
+- Vendedor: carga de pedidos y consulta de sus propios pedidos; el vendedor se toma automáticamente de su sesión.
+- Los porcentajes de Factura común y Factura X suman 100%. La app no emite comprobantes fiscales.
 
-## Notas importantes
+## Advertencia sobre almacenamiento
+La app actual usa SQLite en un archivo local. En Streamlit Community Cloud **no es confiable para pedidos reales**, porque puede reiniciarse o tener instancias independientes. La autenticación se implementó para comenzar las pruebas; **antes de trabajar con vendedores reales** hay que migrar los datos a PostgreSQL/Supabase, implementar copias de seguridad y probar permisos y concurrencia. No cargues información comercial sensible hasta completar esa etapa.
 
-- La fecha y hora corresponden a Argentina y se actualizan cuando Streamlit vuelve a ejecutar la página.
-- Los porcentajes de Factura común y Factura X son campos administrativos; la aplicación **no emite comprobantes**.
-- Un pedido puede tener múltiples artículos. Las cantidades son bultos enteros.
-- Los pedidos NO reservan ni descuentan stock. La distribución inteligente se hace después con el Excel exportado.
-- Los datos se guardan en `pedidos.db` (SQLite), dentro de esta carpeta. Guardar copias de seguridad.
-- **Versión local para pruebas:** no incluye autenticación ni aislamiento de vendedores. No publicarla como multiusuario en Streamlit Cloud tal como está. Para producción se requiere autenticación, roles, auditoría, y una base de datos externa persistente (p. ej. PostgreSQL). El disco de Streamlit Community Cloud no es adecuado para guardar estos pedidos de manera duradera.
-- El Excel de exportación incluye una matriz preliminar. Se ajustará cuando se disponga del formato exacto de Distribución Inteligente.
+## Exportación
+La exportación incluye detalle, matriz, totales y resumen. El formato exacto para Distribución Inteligente se adaptará cuando compartas un Excel de ejemplo.

@@ -1,4 +1,7 @@
 import io
+import hashlib
+import hmac
+import base64
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -13,8 +16,67 @@ TZ = ZoneInfo('America/Argentina/Buenos_Aires')
 
 st.set_page_config(page_title='Cuarto Creciente | Pedidos', page_icon='📦', layout='wide')
 st.markdown('''<style>.block-container{padding-top:1.1rem;max-width:1250px} [data-testid="stMetric"]{background:#f2f6fa;padding:12px;border-radius:12px} </style>''', unsafe_allow_html=True)
-st.image(str(BASE / 'logo.png'), width=480)
+def show_logo():
+    for path in (BASE / 'logo.png', BASE / 'assets' / 'logo.png'):
+        if path.is_file():
+            st.image(str(path), width=480)
+            return
+    st.title('Cuarto Creciente')
+
+
+def check_password(password, stored):
+    try:
+        method, rounds, salt64, hash64 = stored.split('$')
+        if method != 'pbkdf2_sha256':
+            return False
+        derived = hashlib.pbkdf2_hmac('sha256', password.encode(), base64.b64decode(salt64), int(rounds))
+        return hmac.compare_digest(derived, base64.b64decode(hash64))
+    except (ValueError, TypeError):
+        return False
+
+
+def login():
+    if st.session_state.get('authenticated'):
+        return True
+    st.markdown('<div style="height:2rem"></div>', unsafe_allow_html=True)
+    left, center, right = st.columns([1, 1.8, 1])
+    with center:
+        show_logo()
+        st.subheader('Acceso al sistema de pedidos')
+        st.caption('Ingresá con tu usuario y contraseña')
+        try:
+            users = st.secrets['users']
+        except (KeyError, FileNotFoundError):
+            st.error('Falta configurar los usuarios en los Secrets de Streamlit Cloud. Consultá el README.')
+            return False
+        with st.form('login_form'):
+            username = st.text_input('Usuario').strip().lower()
+            password = st.text_input('Contraseña', type='password')
+            submitted = st.form_submit_button('Ingresar', use_container_width=True, type='primary')
+        if submitted:
+            user = users.get(username)
+            if user and check_password(password, user.get('password_hash', '')) and user.get('role') in ('admin', 'vendedor'):
+                st.session_state.authenticated = True
+                st.session_state.username = username
+                st.session_state.role = user['role']
+                st.session_state.display_name = user.get('name', username)
+                st.rerun()
+            else:
+                st.error('Usuario o contraseña incorrectos.')
+    return False
+
+
+if not login():
+    st.stop()
+
+show_logo()
 st.caption('Sistema de pedidos · Cuarto Creciente S.A.')
+with st.sidebar:
+    st.write(f"**{st.session_state.display_name}**")
+    st.caption('Administrador' if st.session_state.role == 'admin' else 'Vendedor')
+    if st.button('Cerrar sesión'):
+        st.session_state.clear()
+        st.rerun()
 
 
 def connect():
@@ -102,7 +164,7 @@ def import_catalog(kind, file):
 init_db()
 now = datetime.now(TZ)
 st.caption(f'Fecha y hora (Argentina): {now:%d/%m/%Y %H:%M:%S} · Se actualiza al interactuar o recargar la página')
-page = st.sidebar.radio('Menú', ['Nuevo pedido','Pedidos guardados','Exportar Excel','Administración'])
+page = st.sidebar.radio('Menú', ['Nuevo pedido','Pedidos guardados','Exportar Excel','Administración'] if st.session_state.role == 'admin' else ['Nuevo pedido','Mis pedidos'])
 
 if page == 'Nuevo pedido':
     st.header('Nuevo pedido')
@@ -117,7 +179,8 @@ if page == 'Nuevo pedido':
         with c1:
             cliente = st.selectbox('Cliente: escribí código o nombre', clientes['codigo'].tolist(), format_func=lambda c: f'{c} · {lookup_c[c].nombre}')
         with c2:
-            vendedor = st.text_input('Vendedor', placeholder='Nombre del vendedor')
+            vendedor = st.session_state.username
+            st.text_input('Vendedor', value=st.session_state.display_name, disabled=True)
         c = lookup_c[cliente]
         lista = c.lista
         st.info(f'Cliente: {c.nombre} · Código: {cliente} · Lista asignada: {lista}')
@@ -175,15 +238,16 @@ if page == 'Nuevo pedido':
                 st.success(f'Pedido #{pid} guardado correctamente.')
                 st.caption('No se descuenta stock: la asignación se realizará en Distribución Inteligente.')
 
-elif page == 'Pedidos guardados':
+elif page in ('Pedidos guardados', 'Mis pedidos'):
     st.header('Pedidos guardados')
-    pedidos=query('SELECT p.id,p.fecha,p.cliente_codigo,p.cliente_nombre,p.lista,p.vendedor,p.pct_comun,p.pct_x,p.estado,COALESCE(SUM(r.cantidad),0) AS bultos FROM pedidos p LEFT JOIN renglones r ON r.pedido_id=p.id GROUP BY p.id ORDER BY p.id DESC')
+    pedidos=query('SELECT p.id,p.fecha,p.cliente_codigo,p.cliente_nombre,p.lista,p.vendedor,p.pct_comun,p.pct_x,p.estado,COALESCE(SUM(r.cantidad),0) AS bultos FROM pedidos p LEFT JOIN renglones r ON r.pedido_id=p.id WHERE (? = \'admin\' OR p.vendedor = ?) GROUP BY p.id ORDER BY p.id DESC', (st.session_state.role, st.session_state.username))
     st.dataframe(pedidos, use_container_width=True, hide_index=True)
     if not pedidos.empty:
         pid=st.selectbox('Ver o editar pedido', pedidos['id'].tolist())
         detalle=query('SELECT articulo_codigo,articulo_nombre,cantidad,precio FROM renglones WHERE pedido_id=?',(int(pid),))
         st.dataframe(detalle, hide_index=True, use_container_width=True)
-        with st.expander('Editar cantidades / estado'):
+        if st.session_state.role == 'admin':
+          with st.expander('Editar cantidades / estado'):
             cambios={}
             for r in detalle.itertuples(index=False):
                 cambios[r.articulo_codigo]=st.number_input(f'{r.articulo_codigo} · {r.articulo_nombre}',min_value=0,value=int(r.cantidad),step=1,key=f'edit_{pid}_{r.articulo_codigo}')
@@ -220,7 +284,7 @@ elif page == 'Exportar Excel':
 
 else:
     st.header('Administración de catálogos')
-    st.warning('Versión local: esta pantalla no tiene control de acceso. No publicar en internet sin autenticación y base de datos compartida.')
+    st.warning('Acceso restringido a administradores. SQLite local NO es almacenamiento persistente para Streamlit Community Cloud: usar PostgreSQL antes de operar con pedidos reales.')
     for kind, title, cols in [('clientes','Clientes',['codigo','nombre','lista']),('articulos','Artículos',['codigo','nombre','precio_1','precio_2','precio_3'])]:
         st.subheader(title)
         current=query(f'SELECT * FROM {kind} ORDER BY codigo')
