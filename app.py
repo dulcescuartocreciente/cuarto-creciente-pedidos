@@ -13,7 +13,7 @@ TZ = ZoneInfo('America/Argentina/Buenos_Aires')
 
 st.set_page_config(page_title='Cuarto Creciente | Pedidos', page_icon='📦', layout='wide')
 st.markdown('''<style>.block-container{padding-top:1.1rem;max-width:1250px} [data-testid="stMetric"]{background:#f2f6fa;padding:12px;border-radius:12px} </style>''', unsafe_allow_html=True)
-st.image(str(BASE / 'assets/logo.png'), width=480)
+st.image(str(BASE / 'logo.png'), width=480)
 st.caption('Sistema de pedidos · Cuarto Creciente S.A.')
 
 
