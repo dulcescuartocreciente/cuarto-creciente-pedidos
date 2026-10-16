@@ -71,7 +71,18 @@ def remote_users(method='GET', username=None, data=None):
     except requests.RequestException as exc:
         raise RuntimeError('No se pudo conectar con Supabase. Revisá la conexión y la URL del proyecto.') from exc
     if not response.ok:
-        raise RuntimeError(f'No se pudo consultar o actualizar usuarios (HTTP {response.status_code}). Revisá la tabla y los Secrets.')
+        # Mostrar solamente el código diagnóstico, nunca el cuerpo completo ni las claves.
+        safe_code = 'sin código'
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                candidate = str(payload.get('code') or payload.get('error_code') or '')
+                if candidate and len(candidate) <= 80 and all(ch.isalnum() or ch in '_-' for ch in candidate):
+                    safe_code = candidate
+        except ValueError:
+            pass
+        key_type = 'nueva sb_secret' if key.startswith('sb_secret_') else ('JWT heredada' if key.count('.') == 2 else 'formato desconocido')
+        raise RuntimeError(f'Supabase respondió HTTP {response.status_code}. Código: {safe_code}. Tipo de clave: {key_type}. No compartas claves.')
     return response.json() if method == 'GET' else None
 
 
