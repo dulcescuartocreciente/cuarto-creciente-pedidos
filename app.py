@@ -112,22 +112,18 @@ def login():
             password = st.text_input('Contraseña', type='password')
             submitted = st.form_submit_button('Ingresar', use_container_width=True, type='primary')
         if submitted:
-            # El administrador local siempre se autentica con Secrets.
-            # Un fallo remoto nunca debe impedirle entrar a corregir la conexión.
             user = None
-            remote_failed = False
             if username == 'admin':
+                # La cuenta administradora local no depende de la API remota.
                 user = users.get('admin')
             elif remote_config():
                 try:
                     found = remote_users(username=username)
-                    if found and found[0].get('active'):
+                    if found and found[0].get('active') and found[0].get('role') == 'vendedor':
                         user = found[0]
-                except RuntimeError as exc:
-                    st.error(str(exc))
-                    remote_failed = True
-            if remote_failed:
-                return False
+                except RuntimeError:
+                    st.error('No se pudo consultar Supabase para ingresar como vendedor. El administrador puede ingresar normalmente.')
+                    return False
             if user and check_password(password, user.get('password_hash', '')) and user.get('role') in ('admin', 'vendedor'):
                 st.session_state.authenticated = True
                 st.session_state.username = username
