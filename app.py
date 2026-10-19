@@ -218,11 +218,8 @@ def import_catalog(kind, file):
     if not set(required).issubset(df.columns):
         raise ValueError('Se necesitan columnas llamadas codigo y nombre.')
     if kind == 'clientes':
-        if 'lista' not in df: df['lista'] = 'Lista 1'
-        df['lista'] = df['lista'].replace('', 'Lista 1')
-        if not df['lista'].isin(['Lista 1','Lista 2','Lista 3']).all():
-            raise ValueError('La columna lista debe ser Lista 1, Lista 2 o Lista 3.')
-        cols = ['codigo','nombre','lista']
+        # La lista se elige para cada pedido; no se guarda ni se importa en clientes.
+        cols = ['codigo','nombre']
     else:
         for col in ['precio_1','precio_2','precio_3']:
             if col not in df: df[col] = '0'
@@ -262,8 +259,13 @@ if page == 'Nuevo pedido':
             vendedor = st.session_state.username
             st.text_input('Vendedor', value=st.session_state.display_name, disabled=True)
         c = lookup_c[cliente]
-        lista = c.lista
-        st.info(f'Cliente: {c.nombre} · Código: {cliente} · Lista asignada: {lista}')
+        st.info(f'Cliente: {c.nombre} · Código: {cliente}')
+        lista = st.selectbox(
+            'Lista de precios para este pedido',
+            ['Lista 1', 'Lista 2', 'Lista 3'],
+            help='El vendedor selecciona la lista según el volumen negociado. Se guarda con el pedido.'
+        )
+        st.caption('Lista 1: general · Lista 2: más de 300 bultos · Lista 3: pallet completo / línea de producción. Verificá las condiciones comerciales antes de guardar.')
         st.subheader('Facturación')
         if 'pct_comun' not in st.session_state: st.session_state.pct_comun = 100.0
         if 'pct_x' not in st.session_state: st.session_state.pct_x = 0.0
@@ -412,9 +414,9 @@ elif page == 'Usuarios':
 else:
     st.header('Administración de catálogos')
     st.warning('Acceso restringido a administradores. SQLite local NO es almacenamiento persistente para Streamlit Community Cloud: usar PostgreSQL antes de operar con pedidos reales.')
-    for kind, title, cols in [('clientes','Clientes',['codigo','nombre','lista']),('articulos','Artículos',['codigo','nombre','precio_1','precio_2','precio_3'])]:
+    for kind, title, cols in [('clientes','Clientes',['codigo','nombre']),('articulos','Artículos',['codigo','nombre','precio_1','precio_2','precio_3'])]:
         st.subheader(title)
-        current=query(f'SELECT * FROM {kind} ORDER BY codigo')
+        current=query(f'SELECT codigo,nombre FROM clientes ORDER BY codigo' if kind == 'clientes' else 'SELECT * FROM articulos ORDER BY codigo')
         st.dataframe(current,use_container_width=True,hide_index=True)
         example=pd.DataFrame(columns=cols)
         st.download_button(f'Descargar plantilla de {kind}',excel_bytes({title:example}),file_name=f'plantilla_{kind}.xlsx',key=f'template_{kind}')
