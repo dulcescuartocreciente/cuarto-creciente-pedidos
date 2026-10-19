@@ -280,18 +280,39 @@ if page == 'Nuevo pedido':
         b.number_input('Factura X (%)', min_value=0.0, max_value=100.0, step=5.0, key='pct_x', on_change=update_x)
         st.caption('Ambos porcentajes se guardan como información administrativa. No se generan comprobantes fiscales.')
         st.subheader('Artículos')
-        pcol,qcol = st.columns([3,1])
-        with pcol:
-            articulo = st.selectbox('Código o nombre del artículo', articulos['codigo'].tolist(), format_func=lambda k: f'{k} · {lookup_a[k].nombre}')
-        with qcol:
-            cantidad = st.number_input('Bultos', min_value=1, step=1, value=1)
-        art = lookup_a[articulo]
-        precio = float(getattr(art, 'precio_'+lista[-1]))
-        st.caption(f'Precio por bulto ({lista}): $ {precio:,.2f}')
-        if 'carrito' not in st.session_state: st.session_state.carrito = {}
-        if st.button('➕ Agregar artículo', type='secondary'):
-            st.session_state.carrito[articulo] = st.session_state.carrito.get(articulo,0) + int(cantidad)
-            st.rerun()
+        # Formulario rápido: Enter agrega el código y los bultos al pedido.
+        # Usar st.form evita que cada pulsación vuelva a ejecutar la página.
+        codigos_por_mayuscula = {str(k).strip().upper(): k for k in lookup_a}
+        if 'carrito' not in st.session_state:
+            st.session_state.carrito = {}
+        if 'mensaje_articulo' not in st.session_state:
+            st.session_state.mensaje_articulo = None
+        with st.form('agregar_articulo_rapido', clear_on_submit=True, enter_to_submit=True):
+            pcol, qcol = st.columns([3, 1])
+            with pcol:
+                codigo_escrito = st.text_input(
+                    'Código del artículo',
+                    placeholder='Ej.: JBP1400',
+                    help='Ingresá el código completo y presioná Enter.'
+                )
+            with qcol:
+                cantidad = st.number_input('Bultos', min_value=1, step=1, value=1)
+            agregar = st.form_submit_button('➕ Agregar artículo', type='secondary')
+        if agregar:
+            codigo = codigo_escrito.strip().upper()
+            encontrado = codigos_por_mayuscula.get(codigo)
+            if encontrado is None:
+                st.session_state.mensaje_articulo = ('error', 'Código no encontrado. Revisá el código del artículo.')
+            else:
+                st.session_state.carrito[encontrado] = st.session_state.carrito.get(encontrado, 0) + int(cantidad)
+                st.session_state.mensaje_articulo = ('ok', f'Agregado: {encontrado} · {lookup_a[encontrado].nombre} · {int(cantidad)} bultos')
+        if st.session_state.mensaje_articulo:
+            tipo_mensaje, mensaje = st.session_state.mensaje_articulo
+            if tipo_mensaje == 'ok':
+                st.success(mensaje)
+            else:
+                st.error(mensaje)
+        st.caption('Escribí el código y los bultos; presioná Enter o Agregar artículo. El precio se aplica según la lista elegida arriba.')
         rows = []
         for code, qty in st.session_state.carrito.items():
             if code in lookup_a:
