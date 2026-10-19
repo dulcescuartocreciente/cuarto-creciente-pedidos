@@ -154,6 +154,7 @@ st.caption('Sistema de pedidos · Cuarto Creciente S.A.')
 with st.sidebar:
     st.write(f"**{st.session_state.display_name}**")
     st.caption('Administrador' if st.session_state.role == 'admin' else 'Vendedor')
+    st.link_button('📊 Seguimiento de pedidos (Drive)', 'https://docs.google.com/spreadsheets/d/1mRNTiXaUAF-lm5q0D1zr5zUPu7XrtN0FvH1u2lwVotw/edit?gid=0#gid=0', use_container_width=True)
     if st.button('Cerrar sesión'):
         st.session_state.clear()
         st.rerun()
@@ -280,54 +281,49 @@ if page == 'Nuevo pedido':
         b.number_input('Factura X (%)', min_value=0.0, max_value=100.0, step=5.0, key='pct_x', on_change=update_x)
         st.caption('Ambos porcentajes se guardan como información administrativa. No se generan comprobantes fiscales.')
         st.subheader('Artículos')
-        # Formulario rápido: Enter agrega el código y los bultos al pedido.
-        # Usar st.form evita que cada pulsación vuelva a ejecutar la página.
-        codigos_por_mayuscula = {str(k).strip().upper(): k for k in lookup_a}
+        st.caption('Escribí los bultos al lado de cada artículo. Dejá 0 para no incluirlo en el pedido.')
         if 'carrito' not in st.session_state:
             st.session_state.carrito = {}
-        if 'mensaje_articulo' not in st.session_state:
-            st.session_state.mensaje_articulo = None
-        with st.form('agregar_articulo_rapido', clear_on_submit=True, enter_to_submit=True):
-            pcol, qcol = st.columns([3, 1])
-            with pcol:
-                codigo_escrito = st.text_input(
-                    'Código del artículo',
-                    placeholder='Ej.: JBP1400',
-                    help='Ingresá el código completo y presioná Enter.'
-                )
-            with qcol:
-                cantidad = st.number_input('Bultos', min_value=1, step=1, value=1)
-            agregar = st.form_submit_button('➕ Agregar artículo', type='secondary')
-        if agregar:
-            codigo = codigo_escrito.strip().upper()
-            encontrado = codigos_por_mayuscula.get(codigo)
-            if encontrado is None:
-                st.session_state.mensaje_articulo = ('error', 'Código no encontrado. Revisá el código del artículo.')
-            else:
-                st.session_state.carrito[encontrado] = st.session_state.carrito.get(encontrado, 0) + int(cantidad)
-                st.session_state.mensaje_articulo = ('ok', f'Agregado: {encontrado} · {lookup_a[encontrado].nombre} · {int(cantidad)} bultos')
-        if st.session_state.mensaje_articulo:
-            tipo_mensaje, mensaje = st.session_state.mensaje_articulo
-            if tipo_mensaje == 'ok':
-                st.success(mensaje)
-            else:
-                st.error(mensaje)
-        st.caption('Escribí el código y los bultos; presioná Enter o Agregar artículo. El precio se aplica según la lista elegida arriba.')
+        # Una casilla por código; el valor se conserva al buscar y al cambiar la lista.
+        for code in lookup_a:
+            widget_key = f'cantidad_art_{code}'
+            if widget_key not in st.session_state:
+                st.session_state[widget_key] = int(st.session_state.carrito.get(code, 0))
+        buscar_articulo = st.text_input('🔎 Buscar por código o nombre', placeholder='Ej.: JBP1400 o mermelada', key='buscar_lista_articulos')
+        filtro = buscar_articulo.strip().casefold()
+        visibles = [r for r in articulos.itertuples(index=False) if filtro in str(r.codigo).casefold() or filtro in str(r.nombre).casefold()]
+        st.caption(f'Mostrando {len(visibles)} de {len(articulos)} artículos')
+        with st.container(height=440, border=True):
+            for art in visibles:
+                col_art, col_precio, col_cant = st.columns([5, 2, 2], vertical_alignment='center')
+                with col_art:
+                    st.markdown(f'**{art.codigo}** · {art.nombre}')
+                with col_precio:
+                    precio_art = float(getattr(art, 'precio_' + lista[-1]))
+                    st.caption(f'$ {precio_art:,.2f} / bulto')
+                with col_cant:
+                    st.number_input(f'Bultos · {art.codigo}', min_value=0, max_value=100000, step=1, key=f'cantidad_art_{art.codigo}', label_visibility='collapsed')
         rows = []
-        for code, qty in st.session_state.carrito.items():
-            if code in lookup_a:
-                item = lookup_a[code]
-                price = float(getattr(item,'precio_'+lista[-1]))
+        for code, item in lookup_a.items():
+            qty = int(st.session_state.get(f'cantidad_art_{code}', 0))
+            if qty > 0:
+                price = float(getattr(item, 'precio_' + lista[-1]))
                 rows.append({'Código artículo':code,'Artículo':item.nombre,'Bultos':qty,'Precio/bulto':price,'Importe':qty*price})
+        total_bultos = sum(r['Bultos'] for r in rows)
+        total_importe = sum(r['Importe'] for r in rows)
+        pct_x = float(st.session_state.pct_x)
+        pct_comun = float(st.session_state.pct_comun)
+        st.subheader('Resumen del pedido')
+        f_x, f_comun, f_total = st.columns(3)
+        f_x.metric('Factura X', f'$ {total_importe * pct_x / 100:,.2f}')
+        f_comun.metric('Factura común', f'$ {total_importe * pct_comun / 100:,.2f}')
+        f_total.metric('TOTAL', f'$ {total_importe:,.2f}')
+        st.metric('Total de bultos', total_bultos)
         if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            st.metric('Total bultos', sum(r['Bultos'] for r in rows))
-            st.metric('Importe total', f"$ {sum(r['Importe'] for r in rows):,.2f}")
-            to_remove = st.selectbox('Quitar artículo', ['—']+[r['Código artículo'] for r in rows])
-            if st.button('Quitar seleccionado', disabled=to_remove=='—'):
-                st.session_state.carrito.pop(to_remove,None)
-                st.rerun()
-        else: st.caption('Agregá artículos para armar el pedido.')
+            with st.expander(f'Ver detalle de los {len(rows)} artículos seleccionados'):
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.info('Todavía no ingresaste cantidades. Escribí los bultos junto a los artículos.')
         if st.button('💾 Guardar pedido', type='primary', disabled=not rows):
             if not vendedor.strip(): st.error('Indicá el vendedor.')
             elif round(st.session_state.pct_comun+st.session_state.pct_x,2)!=100:
@@ -338,6 +334,8 @@ if page == 'Nuevo pedido':
                     pid=cur.lastrowid
                     con.executemany('INSERT INTO renglones (pedido_id,articulo_codigo,articulo_nombre,cantidad,precio) VALUES (?,?,?,?,?)', [(pid,r['Código artículo'],r['Artículo'],r['Bultos'],r['Precio/bulto']) for r in rows])
                 st.session_state.carrito={}
+                for code in lookup_a:
+                    st.session_state[f'cantidad_art_{code}'] = 0
                 st.success(f'Pedido #{pid} guardado correctamente.')
                 st.caption('No se descuenta stock: la asignación se realizará en Distribución Inteligente.')
 
