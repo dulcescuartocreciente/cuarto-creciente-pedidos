@@ -372,7 +372,8 @@ elif page == 'Exportar Excel':
     df=query('''SELECT p.id AS pedido,p.fecha,p.cliente_codigo,p.cliente_nombre,p.lista,p.vendedor,p.pct_comun,p.pct_x,p.estado,r.articulo_codigo,r.articulo_nombre,r.cantidad AS bultos,r.precio,(r.cantidad*r.precio) AS importe FROM pedidos p JOIN renglones r ON p.id=r.pedido_id ORDER BY p.id,r.articulo_codigo''')
     if df.empty: st.info('No hay pedidos para exportar todavía.')
     else:
-        estados=st.multiselect('Estados incluidos',sorted(df.estado.unique()),default=['Pendiente','Revisado'])
+        ted(df.estado.dropna().unique().tolist())
+estados = st.multiselect('Estados incluidos', opciones_estado, default=[e for e in ['Pendiente', 'Revisado'] if e in opciones_estado])
         dff=df[df.estado.isin(estados)].copy()
         if dff.empty: st.warning('No hay renglones con los estados seleccionados.')
         else:
