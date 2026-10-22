@@ -13,7 +13,7 @@ import pandas as pd
 import streamlit as st
 
 BASE = Path(__file__).resolve().parent
-DB = BASE / 'pedidos.db'
+# La base de datos permanente es Supabase; no se utiliza pedidos.db.
 TZ = ZoneInfo('America/Argentina/Buenos_Aires')
 
 st.set_page_config(page_title='Cuarto Creciente | Pedidos', page_icon='📦', layout='wide')
@@ -160,27 +160,72 @@ with st.sidebar:
         st.rerun()
 
 
-def connect():
-    con = sqlite3.connect(DB, timeout=30)
-    con.row_factory = sqlite3.Row
-    con.execute('PRAGMA foreign_keys=ON')
-    con.execute('PRAGMA journal_mode=WAL')
-    return con
+# Supabase es la única fuente de datos de clientes, artículos y pedidos.
+def api(method, path, params=None, data=None, prefer=None):
+    cfg = remote_config()
+    if not cfg:
+        raise RuntimeError('Falta configurar Supabase en los Secrets de Streamlit.')
+    url, key = cfg
+    headers = {'apikey': key, 'Content-Type': 'application/json'}
+    if not key.startswith('sb_secret_'):
+        headers['Authorization'] = f'Bearer {key}'
+    if prefer:
+        headers['Prefer'] = prefer
+    try:
+        res = requests.request(method, f'{url}/rest/v1/{path}', headers=headers,
+                               params=params, json=data, timeout=35)
+    except requests.RequestException as exc:
+        raise RuntimeError('No se pudo conectar con Supabase.') from exc
+    if not res.ok:
+        raise RuntimeError(f'Supabase: HTTP {res.status_code}. Revisá que el SQL se haya ejecutado y los permisos de la base.')
+    return res.json() if res.content else None
 
 
-def init_db():
-    with connect() as con:
-        con.executescript('''
-        CREATE TABLE IF NOT EXISTS clientes (codigo TEXT PRIMARY KEY, nombre TEXT NOT NULL, lista TEXT NOT NULL DEFAULT 'Lista 1');
-        CREATE TABLE IF NOT EXISTS articulos (codigo TEXT PRIMARY KEY, nombre TEXT NOT NULL, precio_1 REAL NOT NULL DEFAULT 0, precio_2 REAL NOT NULL DEFAULT 0, precio_3 REAL NOT NULL DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS pedidos (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT NOT NULL, cliente_codigo TEXT NOT NULL, cliente_nombre TEXT NOT NULL, lista TEXT NOT NULL, vendedor TEXT NOT NULL, pct_comun REAL NOT NULL, pct_x REAL NOT NULL, estado TEXT NOT NULL DEFAULT 'Pendiente');
-        CREATE TABLE IF NOT EXISTS renglones (id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL REFERENCES pedidos(id), articulo_codigo TEXT NOT NULL, articulo_nombre TEXT NOT NULL, cantidad INTEGER NOT NULL, precio REAL NOT NULL);
-        ''')
+def fetch_table(name):
+    # Paginación para no perder filas si se supera el límite de la API.
+    rows = []
+    offset = 0
+    while True:
+        chunk = api('GET', name, params={'select': '*', 'limit': 1000, 'offset': offset}) or []
+        rows.extend(chunk)
+        if len(chunk) < 1000:
+            break
+        offset += 1000
+    return rows
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def snapshot():
+    return {name: fetch_table(name) for name in ('clientes', 'articulos', 'pedidos', 'renglones')}
+
+
+def refresh():
+    snapshot.clear()
 
 
 def query(sql, params=()):
-    with connect() as con:
+    # Consultas existentes de informes sobre una copia temporal en memoria.
+    # NUNCA se guardan datos comerciales en el disco de Streamlit.
+    data = snapshot()
+    con = sqlite3.connect(':memory:')
+    try:
+        for name, rows in data.items():
+            if name == 'clientes':
+                schema = 'codigo TEXT, nombre TEXT, activo INTEGER, actualizado_en TEXT'
+            elif name == 'articulos':
+                schema = 'codigo TEXT, nombre TEXT, precio_1 REAL, precio_2 REAL, precio_3 REAL, activo INTEGER, actualizado_en TEXT'
+            elif name == 'pedidos':
+                schema = 'id INTEGER, fecha TEXT, cliente_codigo TEXT, cliente_nombre TEXT, lista TEXT, vendedor TEXT, pct_comun REAL, pct_x REAL, estado TEXT'
+            else:
+                schema = 'id INTEGER, pedido_id INTEGER, articulo_codigo TEXT, articulo_nombre TEXT, cantidad INTEGER, precio REAL'
+            con.execute(f'CREATE TABLE {name} ({schema})')
+            if rows:
+                cols = [c[1] for c in con.execute(f'PRAGMA table_info({name})')]
+                values = [tuple(row.get(c) for c in cols) for row in rows]
+                con.executemany(f'INSERT INTO {name} ({",".join(cols)}) VALUES ({",".join("?" for _ in cols)})', values)
         return pd.read_sql_query(sql, con, params=params)
+    finally:
+        con.close()
 
 
 def excel_bytes(sheets):
@@ -232,33 +277,39 @@ def import_catalog(kind, file):
     df['nombre'] = df['nombre'].astype(str).str.strip()
     if (df['codigo']=='').any() or (df['nombre']=='').any() or df['codigo'].duplicated().any():
         raise ValueError('Hay códigos duplicados, códigos vacíos o nombres vacíos.')
-    # Comparar por código y modificar únicamente los registros con diferencias.
-    nuevos = 0
-    modificados = 0
-    sin_cambios = 0
-    with connect() as con:
-        for row in df.itertuples(index=False, name=None):
-            record = dict(zip(cols, row))
-            existing = con.execute(f'SELECT {",".join(cols)} FROM {kind} WHERE codigo=?', (record['codigo'],)).fetchone()
-            if existing is None:
-                marks = ','.join('?' for _ in cols)
-                con.execute(f'INSERT INTO {kind} ({",".join(cols)}) VALUES ({marks})', row)
-                nuevos += 1
-            else:
-                changed = [c for c in cols if c != 'codigo' and (
-                    float(existing[c]) != float(record[c]) if c.startswith('precio_')
-                    else str(existing[c]) != str(record[c])
-                )]
-                if changed:
-                    assigns = ','.join(f'{c}=?' for c in changed)
-                    con.execute(f'UPDATE {kind} SET {assigns} WHERE codigo=?',
-                                [record[c] for c in changed] + [record['codigo']])
-                    modificados += 1
-                else:
-                    sin_cambios += 1
-    return {'nuevos': nuevos, 'modificados': modificados, 'sin_cambios': sin_cambios}
+    # Vista previa y actualización exclusiva de registros realmente cambiados.
+    existentes = {r['codigo']: r for r in fetch_table(kind)}
+    nuevos, modificados, sin_cambios = [], [], 0
+    for row in df.to_dict('records'):
+        row = {k: (float(v) if k.startswith('precio_') else str(v)) for k, v in row.items()}
+        previo = existentes.get(row['codigo'])
+        if previo is None:
+            nuevos.append(row)
+        elif any((round(float(previo[k]), 2) != round(float(row[k]), 2)) if k.startswith('precio_')
+                 else str(previo[k]) != str(row[k]) for k in cols if k != 'codigo'):
+            modificados.append(row)
+        else:
+            sin_cambios += 1
+    return nuevos, modificados, sin_cambios
 
-init_db()
+
+def apply_catalog(kind, nuevos, modificados, sin_cambios):
+    # Upsert por código, únicamente para los nuevos o modificados.
+    for group in (nuevos, modificados):
+        for start in range(0, len(group), 200):
+            api('POST', kind, data=group[start:start + 200],
+                prefer='resolution=merge-duplicates,return=minimal')
+    api('POST', 'importaciones', data={
+        'usuario': st.session_state.username, 'catalogo': kind,
+        'nuevos': len(nuevos), 'modificados': len(modificados),
+        'sin_cambios': sin_cambios}, prefer='return=minimal')
+    refresh()
+
+
+if not remote_config():
+    st.error('No está configurada la conexión a Supabase. No se pueden guardar pedidos.')
+    st.stop()
+
 now = datetime.now(TZ)
 st.caption(f'Fecha y hora (Argentina): {now:%d/%m/%Y %H:%M:%S} · Se actualiza al interactuar o recargar la página')
 page = st.sidebar.radio('Menú', ['Nuevo pedido','Pedidos guardados','Exportar Excel','Administración','Usuarios'] if st.session_state.role == 'admin' else ['Nuevo pedido','Mis pedidos'])
@@ -387,10 +438,16 @@ if page == 'Nuevo pedido':
             elif round(st.session_state.pct_comun+st.session_state.pct_x,2)!=100:
                 st.error('Los porcentajes deben sumar 100%.')
             else:
-                with connect() as con:
-                    cur=con.execute('INSERT INTO pedidos (fecha,cliente_codigo,cliente_nombre,lista,vendedor,pct_comun,pct_x) VALUES (?,?,?,?,?,?,?)', (datetime.now(TZ).isoformat(timespec='seconds'),cliente,c.nombre,lista,vendedor.strip(),st.session_state.pct_comun,st.session_state.pct_x))
-                    pid=cur.lastrowid
-                    con.executemany('INSERT INTO renglones (pedido_id,articulo_codigo,articulo_nombre,cantidad,precio) VALUES (?,?,?,?,?)', [(pid,r['Código artículo'],r['Artículo'],r['Bultos'],r['Precio/bulto']) for r in rows])
+                pid = api('POST', 'rpc/crear_pedido', data={
+                    'p_cliente_codigo': cliente, 'p_cliente_nombre': c.nombre,
+                    'p_lista': lista, 'p_vendedor': vendedor.strip(),
+                    'p_pct_comun': float(st.session_state.pct_comun),
+                    'p_pct_x': float(st.session_state.pct_x),
+                    'p_renglones': [{'articulo_codigo': r['Código artículo'],
+                                    'articulo_nombre': r['Artículo'],
+                                    'cantidad': r['Bultos'], 'precio': r['Precio/bulto']}
+                                   for r in rows]})
+                refresh()
                 st.session_state.carrito={}
                 st.session_state.reiniciar_cantidades_pedido = True
                 st.success(f'Pedido #{pid} guardado correctamente. Para iniciar otro pedido, actualizá la pantalla.')
@@ -413,11 +470,14 @@ elif page in ('Pedidos guardados', 'Mis pedidos'):
             estados=['Pendiente','Revisado','Exportado','Cancelado']
             estado=st.selectbox('Estado',estados,index=estados.index(estado_actual) if estado_actual in estados else 0)
             if st.button('Guardar cambios'):
-                with connect() as con:
-                    for code,qty in cambios.items():
-                        if qty==0: con.execute('DELETE FROM renglones WHERE pedido_id=? AND articulo_codigo=?',(int(pid),code))
-                        else: con.execute('UPDATE renglones SET cantidad=? WHERE pedido_id=? AND articulo_codigo=?',(int(qty),int(pid),code))
-                    con.execute('UPDATE pedidos SET estado=? WHERE id=?',(estado,int(pid)))
+                for code, qty in cambios.items():
+                    filters = {'pedido_id': f'eq.{int(pid)}', 'articulo_codigo': f'eq.{code}'}
+                    if qty == 0:
+                        api('DELETE', 'renglones', params=filters)
+                    else:
+                        api('PATCH', 'renglones', params=filters, data={'cantidad': int(qty)})
+                api('PATCH', 'pedidos', params={'id': f'eq.{int(pid)}'}, data={'estado': estado})
+                refresh()
                 st.success('Pedido actualizado.')
                 st.rerun()
 
@@ -490,7 +550,7 @@ elif page == 'Usuarios':
 
 else:
     st.header('Administración de catálogos')
-    st.warning('Acceso restringido a administradores. SQLite local NO es almacenamiento persistente para Streamlit Community Cloud: usar PostgreSQL antes de operar con pedidos reales.')
+    st.info('Clientes, artículos y pedidos se guardan en Supabase. Importar Excel actualiza solo los registros con diferencias.')
     for kind, title, cols in [('clientes','Clientes',['codigo','nombre']),('articulos','Artículos',['codigo','nombre','precio_1','precio_2','precio_3'])]:
         st.subheader(title)
         current=query(f'SELECT codigo,nombre FROM clientes ORDER BY codigo' if kind == 'clientes' else 'SELECT * FROM articulos ORDER BY codigo')
@@ -498,14 +558,24 @@ else:
         example=pd.DataFrame(columns=cols)
         st.download_button(f'Descargar plantilla de {kind}',excel_bytes({title:example}),file_name=f'plantilla_{kind}.xlsx',key=f'template_{kind}')
         file=st.file_uploader(f'Importar {title.lower()} (Excel o CSV)',type=['xlsx','csv'],key=f'upload_{kind}')
-        if file and st.button(f'Importar {title.lower()}',key=f'btn_{kind}'):
+        if file:
             try:
-                n=import_catalog(kind,file)
-                st.success(f"Importación terminada: {n['nuevos']} nuevos, {n['modificados']} actualizados y {n['sin_cambios']} sin cambios.")
-                st.rerun()
-            except Exception as e:
+                nuevos, modificados, sin_cambios = import_catalog(kind, file)
+                st.write(f'**Vista previa:** {len(nuevos)} nuevos · {len(modificados)} modificados · {sin_cambios} sin cambios.')
+                if modificados:
+                    st.dataframe(pd.DataFrame(modificados).head(30), hide_index=True, use_container_width=True)
+                if st.button(f'Confirmar actualización de {title.lower()}', key=f'btn_{kind}',
+                             disabled=not (nuevos or modificados)):
+                    apply_catalog(kind, nuevos, modificados, sin_cambios)
+                    st.success('Importación aplicada en Supabase.')
+                    st.rerun()
+            except (ValueError, RuntimeError) as e:
                 st.error(f'No se pudo importar: {e}')
     st.divider()
     st.subheader('Copia de seguridad')
-    st.download_button('Descargar base de datos SQLite',data=DB.read_bytes(),file_name='pedidos_backup.db',mime='application/octet-stream')
+    st.download_button('⬇️ Exportar clientes y artículos',
+        data=excel_bytes({'Clientes': query('SELECT codigo,nombre FROM clientes ORDER BY codigo'),
+                          'Artículos': query('SELECT codigo,nombre,precio_1,precio_2,precio_3 FROM articulos ORDER BY codigo')}),
+        file_name='catalogos_cuarto_creciente.xlsx',
+        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     st.caption('Los códigos deben conservarse como texto para no perder ceros iniciales. Importar actualiza registros existentes por código sin borrar los demás.')
