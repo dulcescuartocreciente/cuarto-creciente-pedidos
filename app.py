@@ -232,12 +232,31 @@ def import_catalog(kind, file):
     df['nombre'] = df['nombre'].astype(str).str.strip()
     if (df['codigo']=='').any() or (df['nombre']=='').any() or df['codigo'].duplicated().any():
         raise ValueError('Hay códigos duplicados, códigos vacíos o nombres vacíos.')
+    # Comparar por código y modificar únicamente los registros con diferencias.
+    nuevos = 0
+    modificados = 0
+    sin_cambios = 0
     with connect() as con:
         for row in df.itertuples(index=False, name=None):
-            marks = ','.join('?' for _ in cols)
-            updates = ','.join(f'{c}=excluded.{c}' for c in cols if c!='codigo')
-            con.execute(f'INSERT INTO {kind} ({",".join(cols)}) VALUES ({marks}) ON CONFLICT(codigo) DO UPDATE SET {updates}', row)
-    return len(df)
+            record = dict(zip(cols, row))
+            existing = con.execute(f'SELECT {",".join(cols)} FROM {kind} WHERE codigo=?', (record['codigo'],)).fetchone()
+            if existing is None:
+                marks = ','.join('?' for _ in cols)
+                con.execute(f'INSERT INTO {kind} ({",".join(cols)}) VALUES ({marks})', row)
+                nuevos += 1
+            else:
+                changed = [c for c in cols if c != 'codigo' and (
+                    float(existing[c]) != float(record[c]) if c.startswith('precio_')
+                    else str(existing[c]) != str(record[c])
+                )]
+                if changed:
+                    assigns = ','.join(f'{c}=?' for c in changed)
+                    con.execute(f'UPDATE {kind} SET {assigns} WHERE codigo=?',
+                                [record[c] for c in changed] + [record['codigo']])
+                    modificados += 1
+                else:
+                    sin_cambios += 1
+    return {'nuevos': nuevos, 'modificados': modificados, 'sin_cambios': sin_cambios}
 
 init_db()
 now = datetime.now(TZ)
@@ -246,6 +265,41 @@ page = st.sidebar.radio('Menú', ['Nuevo pedido','Pedidos guardados','Exportar E
 
 if page == 'Nuevo pedido':
     st.header('Nuevo pedido')
+    # Indicadores globales: un cliente se cuenta una sola vez aunque tenga varios pedidos.
+    resumen_clientes = query('''SELECT
+        (SELECT COUNT(*) FROM clientes) AS clientes_totales,
+        (SELECT COUNT(DISTINCT cliente_codigo) FROM pedidos WHERE estado != 'Cancelado') AS clientes_con_pedidos''').iloc[0]
+    total_clientes = int(resumen_clientes['clientes_totales'])
+    clientes_con_pedidos = int(resumen_clientes['clientes_con_pedidos'])
+    k1, k2, k3 = st.columns(3)
+    k1.metric('Clientes totales', f'{total_clientes:,}'.replace(',', '.'))
+    k2.metric('Clientes con pedidos', f'{clientes_con_pedidos:,}'.replace(',', '.'))
+    k3.metric('Clientes sin pedidos', f'{max(0, total_clientes-clientes_con_pedidos):,}'.replace(',', '.'))
+    st.caption('Clientes con pedidos: clientes distintos con al menos un pedido no cancelado, de todos los vendedores.')
+    # Actividad comercial: cada cliente se cuenta una vez por vendedor.
+    if st.session_state.role == 'admin':
+        st.subheader('Clientes atendidos por vendedor')
+        actividad = query("""SELECT vendedor AS Vendedor,
+            COUNT(DISTINCT cliente_codigo) AS 'Clientes con pedidos',
+            COUNT(*) AS 'Pedidos realizados'
+            FROM pedidos WHERE estado != 'Cancelado'
+            GROUP BY vendedor ORDER BY 2 DESC, 3 DESC, vendedor""")
+        if actividad.empty:
+            st.info('Todavía no hay pedidos registrados por vendedores.')
+        else:
+            st.dataframe(actividad, use_container_width=True, hide_index=True)
+            st.caption('Un cliente atendido por dos vendedores se cuenta una vez para cada uno; en el total general se cuenta una sola vez.')
+            st.download_button('⬇️ Descargar actividad por vendedor',
+                data=excel_bytes({'Actividad vendedores': actividad}),
+                file_name=f'actividad_vendedores_{datetime.now(TZ):%Y%m%d}.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    else:
+        propios = query("""SELECT COUNT(DISTINCT cliente_codigo) AS clientes,
+            COUNT(*) AS pedidos FROM pedidos
+            WHERE estado != 'Cancelado' AND vendedor = ?""", (st.session_state.username,)).iloc[0]
+        a1, a2 = st.columns(2)
+        a1.metric('Mis clientes atendidos', int(propios['clientes']))
+        a2.metric('Mis pedidos realizados', int(propios['pedidos']))
     clientes = query('SELECT * FROM clientes ORDER BY nombre')
     articulos = query('SELECT * FROM articulos ORDER BY nombre')
     if clientes.empty or articulos.empty:
@@ -284,6 +338,10 @@ if page == 'Nuevo pedido':
         st.caption('Escribí los bultos al lado de cada artículo. Dejá 0 para no incluirlo en el pedido.')
         if 'carrito' not in st.session_state:
             st.session_state.carrito = {}
+        # Reiniciar cantidades al comienzo de la ejecución siguiente, antes de crear widgets.
+        if st.session_state.pop('reiniciar_cantidades_pedido', False):
+            for code in lookup_a:
+                st.session_state[f'cantidad_art_{code}'] = 0
         # Una casilla por código; el valor se conserva al buscar y al cambiar la lista.
         for code in lookup_a:
             widget_key = f'cantidad_art_{code}'
@@ -334,9 +392,8 @@ if page == 'Nuevo pedido':
                     pid=cur.lastrowid
                     con.executemany('INSERT INTO renglones (pedido_id,articulo_codigo,articulo_nombre,cantidad,precio) VALUES (?,?,?,?,?)', [(pid,r['Código artículo'],r['Artículo'],r['Bultos'],r['Precio/bulto']) for r in rows])
                 st.session_state.carrito={}
-                for code in lookup_a:
-                    st.session_state[f'cantidad_art_{code}'] = 0
-                st.success(f'Pedido #{pid} guardado correctamente.')
+                st.session_state.reiniciar_cantidades_pedido = True
+                st.success(f'Pedido #{pid} guardado correctamente. Para iniciar otro pedido, actualizá la pantalla.')
                 st.caption('No se descuenta stock: la asignación se realizará en Distribución Inteligente.')
 
 elif page in ('Pedidos guardados', 'Mis pedidos'):
@@ -444,7 +501,7 @@ else:
         if file and st.button(f'Importar {title.lower()}',key=f'btn_{kind}'):
             try:
                 n=import_catalog(kind,file)
-                st.success(f'{n} registros importados o actualizados.')
+                st.success(f"Importación terminada: {n['nuevos']} nuevos, {n['modificados']} actualizados y {n['sin_cambios']} sin cambios.")
                 st.rerun()
             except Exception as e:
                 st.error(f'No se pudo importar: {e}')
