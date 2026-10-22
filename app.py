@@ -500,22 +500,27 @@ elif page == 'Exportar Excel':
             data=excel_bytes({'Detalle pedidos':dff,'Matriz distribucion':matriz,'Totales articulos':totales,'Resumen clientes':resumen})
             st.download_button('⬇️ Descargar Excel de pedidos',data=data,file_name=f'pedidos_cuarto_creciente_{datetime.now(TZ):%Y%m%d_%H%M}.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',type='primary')
             st.divider()
-            st.subheader('📦 Excel de expedición — Distribución Inteligente')
-            st.caption('Archivo independiente, con solo código de cliente, nombre, producto, código de producto y bultos. Usa los mismos estados seleccionados arriba; no incluye pedidos cancelados salvo que los selecciones expresamente.')
-            expedicion = dff[['cliente_codigo', 'cliente_nombre', 'articulo_nombre', 'articulo_codigo', 'bultos']].copy()
-            expedicion.columns = ['Código de cliente', 'Nombre de cliente', 'Producto', 'Código de producto', 'Cantidad de bultos']
-            expedicion['Código de cliente'] = expedicion['Código de cliente'].astype(str)
-            expedicion['Código de producto'] = expedicion['Código de producto'].astype(str)
-            expedicion['Cantidad de bultos'] = expedicion['Cantidad de bultos'].astype(int)
-            # Consolidar todos los pedidos seleccionados por código de cliente y artículo.
-            # Mantener el nombre y la descripción del catálogo como etiquetas.
-            expedicion = (expedicion.groupby(['Código de cliente', 'Código de producto'], as_index=False, sort=False)
-                          .agg({'Nombre de cliente': 'first', 'Producto': 'first', 'Cantidad de bultos': 'sum'}))
-            expedicion = expedicion[['Código de cliente', 'Nombre de cliente', 'Producto', 'Código de producto', 'Cantidad de bultos']]
-            expedicion = expedicion.sort_values(['Nombre de cliente', 'Código de producto'], kind='stable').reset_index(drop=True)
+            st.subheader('📦 Excel para Distribuidor')
+            st.caption('Archivo independiente: CODIGO, DESCRIPCION, CANTIDAD y CLIENTE. Suma bultos del mismo artículo por cliente.')
+            expedicion = dff[['cliente_codigo', 'cliente_nombre', 'articulo_codigo', 'articulo_nombre', 'bultos']].copy()
+            expedicion['cliente_codigo'] = expedicion['cliente_codigo'].astype(str)
+            expedicion['articulo_codigo'] = expedicion['articulo_codigo'].astype(str)
+            expedicion['bultos'] = pd.to_numeric(expedicion['bultos'], errors='raise').astype(int)
+            # Agrupar por códigos, para evitar mezclar clientes con el mismo nombre.
+            expedicion = (expedicion.groupby(['cliente_codigo', 'articulo_codigo'], as_index=False, sort=False)
+                          .agg({'cliente_nombre': 'first', 'articulo_nombre': 'first', 'bultos': 'sum'}))
+            expedicion = expedicion.rename(columns={
+                'articulo_codigo': 'CODIGO', 'articulo_nombre': 'DESCRIPCION',
+                'bultos': 'CANTIDAD', 'cliente_nombre': 'CLIENTE'})
+            expedicion = expedicion[['CODIGO', 'DESCRIPCION', 'CANTIDAD', 'CLIENTE']]
+            expedicion = expedicion.sort_values(['CLIENTE', 'CODIGO'], kind='stable').reset_index(drop=True)
             st.dataframe(expedicion, use_container_width=True, hide_index=True)
-            st.download_button('⬇️ Descargar SOLO Excel de expedición', data=excel_bytes({'Pedidos expedicion': expedicion}), file_name=f'expedicion_cuarto_creciente_{datetime.now(TZ):%Y%m%d_%H%M}.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', type='primary', key='descargar_expedicion')
-            st.caption('Se conserva el Excel completo anterior como descarga separada. Si un cliente tiene el mismo producto en varios pedidos seleccionados, se suman los bultos en una sola fila.')
+            st.download_button('⬇️ Descargar Excel para Distribuidor',
+                data=excel_bytes({'Distribuidor': expedicion}),
+                file_name=f'distribuidor_cuarto_creciente_{datetime.now(TZ):%Y%m%d_%H%M}.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                type='primary', key='descargar_expedicion')
+            st.caption('La descarga completa se mantiene separada. Los pedidos cancelados solo se incluyen si los seleccionás.')
 
 elif page == 'Usuarios':
     st.header('Administración de usuarios')
