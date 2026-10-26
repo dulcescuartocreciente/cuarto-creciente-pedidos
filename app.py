@@ -312,6 +312,37 @@ if not remote_config():
 
 now = datetime.now(TZ)
 st.caption(f'Fecha y hora (Argentina): {now:%d/%m/%Y %H:%M:%S} · Se actualiza al interactuar o recargar la página')
+def formulario_alta_cliente(origen):
+    """Alta compartida para vendedores y administración, con validación de duplicados."""
+    st.subheader('➕ Ingresar nuevo cliente')
+    st.caption('El cliente se guarda en Supabase y queda disponible para todos los vendedores.')
+    with st.form(f'alta_cliente_{origen}', clear_on_submit=True):
+        nuevo_codigo = st.text_input('Código del cliente', key=f'codigo_cliente_{origen}',
+                                     help='Usá el código del sistema comercial; se conservan los ceros iniciales.')
+        nuevo_nombre = st.text_input('Nombre o razón social', key=f'nombre_cliente_{origen}')
+        guardar_cliente = st.form_submit_button('Guardar nuevo cliente', type='primary')
+    if guardar_cliente:
+        codigo_limpio = nuevo_codigo.strip()
+        nombre_limpio = nuevo_nombre.strip()
+        if not codigo_limpio or not nombre_limpio:
+            st.error('Completá el código y el nombre del cliente.')
+        elif len(codigo_limpio) > 100 or len(nombre_limpio) > 250:
+            st.error('El código o el nombre es demasiado largo.')
+        else:
+            try:
+                existente = api('GET', 'clientes', params={'select': 'codigo,nombre', 'codigo': f'eq.{codigo_limpio}'}) or []
+                if existente:
+                    st.error(f'El código {codigo_limpio} ya pertenece a {existente[0]["nombre"]}. No se modificó.')
+                else:
+                    api('POST', 'clientes', data={'codigo': codigo_limpio, 'nombre': nombre_limpio}, prefer='return=minimal')
+                    refresh()
+                    st.session_state['cliente_recien_creado'] = codigo_limpio
+                    st.toast(f'Cliente {nombre_limpio} guardado correctamente.', icon='✅')
+                    st.rerun()
+            except RuntimeError as exc:
+                st.error(f'No se pudo guardar el cliente: {exc}')
+
+
 page = st.sidebar.radio('Menú', ['Nuevo pedido','Pedidos guardados','Exportar Excel','Administración','Usuarios'] if st.session_state.role == 'admin' else ['Nuevo pedido','Mis pedidos'])
 
 if page == 'Nuevo pedido':
@@ -351,6 +382,8 @@ if page == 'Nuevo pedido':
         a1, a2 = st.columns(2)
         a1.metric('Mis clientes atendidos', int(propios['clientes']))
         a2.metric('Mis pedidos realizados', int(propios['pedidos']))
+    with st.expander('➕ ¿El cliente no existe? Dar de alta un cliente nuevo'):
+        formulario_alta_cliente('vendedor' if st.session_state.role == 'vendedor' else 'nuevo_pedido')
     clientes = query('SELECT * FROM clientes ORDER BY nombre')
     articulos = query('SELECT * FROM articulos ORDER BY nombre')
     if clientes.empty or articulos.empty:
@@ -360,7 +393,10 @@ if page == 'Nuevo pedido':
         lookup_a = {r.codigo: r for r in articulos.itertuples(index=False)}
         c1,c2 = st.columns([2,1])
         with c1:
-            cliente = st.selectbox('Cliente: escribí código o nombre', clientes['codigo'].tolist(), format_func=lambda c: f'{c} · {lookup_c[c].nombre}')
+            codigo_preseleccionado = st.session_state.pop('cliente_recien_creado', None)
+            opciones_clientes = clientes['codigo'].tolist()
+            indice_cliente = opciones_clientes.index(codigo_preseleccionado) if codigo_preseleccionado in opciones_clientes else 0
+            cliente = st.selectbox('Cliente: escribí código o nombre', opciones_clientes, index=indice_cliente, format_func=lambda c: f'{c} · {lookup_c[c].nombre}')
         with c2:
             vendedor = st.session_state.username
             st.text_input('Vendedor', value=st.session_state.display_name, disabled=True)
@@ -456,7 +492,51 @@ if page == 'Nuevo pedido':
 elif page in ('Pedidos guardados', 'Mis pedidos'):
     st.header('Pedidos guardados')
     pedidos=query('SELECT p.id,p.fecha,p.cliente_codigo,p.cliente_nombre,p.lista,p.vendedor,p.pct_comun,p.pct_x,p.estado,COALESCE(SUM(r.cantidad),0) AS bultos FROM pedidos p LEFT JOIN renglones r ON r.pedido_id=p.id WHERE (? = \'admin\' OR p.vendedor = ?) GROUP BY p.id ORDER BY p.id DESC', (st.session_state.role, st.session_state.username))
-    st.dataframe(pedidos, use_container_width=True, hide_index=True)
+    if st.session_state.role == 'admin' and not pedidos.empty:
+        st.subheader('Gestión masiva de estados')
+        st.caption('Seleccioná pedidos con las casillas y aplicá un estado a todos los seleccionados. Los cambios se guardan en Supabase.')
+        opciones = ['Todos', 'Pendiente', 'Revisado', 'Exportado', 'Cancelado']
+        filtro_estado = st.selectbox('Filtrar por estado', opciones, key='filtro_estado_pedidos')
+        vista = pedidos if filtro_estado == 'Todos' else pedidos[pedidos['estado'] == filtro_estado]
+        if not vista.empty:
+            ids_visibles = [int(v) for v in vista['id'].tolist()]
+            if st.button('Seleccionar todos los pedidos visibles', key='seleccionar_pedidos_visibles'):
+                for numero in ids_visibles:
+                    st.session_state[f'marcar_pedido_{numero}'] = True
+                st.rerun()
+            seleccion = vista[['id', 'fecha', 'cliente_codigo', 'cliente_nombre', 'vendedor', 'bultos', 'estado']].copy()
+            seleccion.insert(0, 'Seleccionar', [bool(st.session_state.get(f'marcar_pedido_{int(numero)}', False)) for numero in seleccion['id']])
+            # El editor usa una clave propia por filtro; se guardan las selecciones entre filtros.
+            editado = st.data_editor(seleccion, hide_index=True, use_container_width=True,
+                disabled=[col for col in seleccion.columns if col != 'Seleccionar'],
+                column_config={'Seleccionar': st.column_config.CheckboxColumn('✓', help='Marcar pedido para cambiar estado')},
+                key=f'tabla_estados_{filtro_estado}')
+            for numero, marcado in zip(editado['id'], editado['Seleccionar']):
+                st.session_state[f'marcar_pedido_{int(numero)}'] = bool(marcado)
+            elegidos = [int(numero) for numero in pedidos['id'] if st.session_state.get(f'marcar_pedido_{int(numero)}', False)]
+            st.write(f'**{len(elegidos)} pedidos seleccionados**')
+            with st.form('cambio_masivo_estados'):
+                nuevo_estado = st.selectbox('Editar estado', ['Pendiente', 'Revisado', 'Exportado', 'Cancelado'])
+                aplicar = st.form_submit_button('Aplicar estado a los seleccionados', type='primary', disabled=not elegidos)
+            if aplicar and elegidos:
+                try:
+                    # Se aplica únicamente a los IDs seleccionados, no a los demás pedidos.
+                    for inicio in range(0, len(elegidos), 100):
+                        lote = elegidos[inicio:inicio + 100]
+                        api('PATCH', 'pedidos', params={'id': f'in.({",".join(map(str, lote))})'}, data={'estado': nuevo_estado})
+                    refresh()
+                    for numero in elegidos:
+                        st.session_state.pop(f'marcar_pedido_{numero}', None)
+                    st.success(f'{len(elegidos)} pedidos actualizados a {nuevo_estado}.')
+                    st.rerun()
+                except RuntimeError as exc:
+                    st.error(f'No se pudo completar el cambio de estados: {exc}')
+        else:
+            st.info('No hay pedidos con ese estado.')
+        st.divider()
+        st.subheader('Detalle de pedidos')
+    else:
+        st.dataframe(pedidos, use_container_width=True, hide_index=True)
     if not pedidos.empty:
         pid=st.selectbox('Ver o editar pedido', pedidos['id'].tolist())
         detalle=query('SELECT articulo_codigo,articulo_nombre,cantidad,precio FROM renglones WHERE pedido_id=?',(int(pid),))
@@ -572,6 +652,8 @@ elif page == 'Usuarios':
 else:
     st.header('Administración de catálogos')
     st.info('Clientes, artículos y pedidos se guardan en Supabase. Importar Excel actualiza solo los registros con diferencias.')
+    formulario_alta_cliente('administracion')
+    st.divider()
     for kind, title, cols in [('clientes','Clientes',['codigo','nombre']),('articulos','Artículos',['codigo','nombre','precio_1','precio_2','precio_3'])]:
         st.subheader(title)
         current=query(f'SELECT codigo,nombre FROM clientes ORDER BY codigo' if kind == 'clientes' else 'SELECT * FROM articulos ORDER BY codigo')
