@@ -343,6 +343,45 @@ def formulario_alta_cliente(origen):
                 st.error(f'No se pudo guardar el cliente: {exc}')
 
 
+def formulario_alta_articulo():
+    """Carga manual de artículos, sin alterar la importación masiva por Excel."""
+    st.subheader('➕ Agregar artículo manualmente')
+    st.caption('Ingresá el código, la descripción y los precios por bulto de las tres listas.')
+    with st.form('alta_articulo_manual', clear_on_submit=True):
+        codigo = st.text_input('Código del artículo', help='Se guarda como texto, incluidos los ceros iniciales.')
+        nombre = st.text_input('Nombre / descripción del artículo')
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            precio_1 = st.number_input('Precio lista 1 ($)', min_value=0.0, step=1.0, format='%.2f')
+        with c2:
+            precio_2 = st.number_input('Precio lista 2 ($)', min_value=0.0, step=1.0, format='%.2f')
+        with c3:
+            precio_3 = st.number_input('Precio lista 3 ($)', min_value=0.0, step=1.0, format='%.2f')
+        guardar = st.form_submit_button('Guardar artículo', type='primary')
+    if guardar:
+        codigo, nombre = codigo.strip(), nombre.strip()
+        if not codigo or not nombre:
+            st.error('Completá el código y el nombre del artículo.')
+        elif len(codigo) > 100 or len(nombre) > 250:
+            st.error('El código o el nombre es demasiado largo.')
+        else:
+            try:
+                existente = api('GET', 'articulos', params={'select': 'codigo,nombre', 'codigo': f'eq.{codigo}'}) or []
+                if existente:
+                    st.error(f'Ya existe el artículo {codigo}: {existente[0]["nombre"]}. No se modificó.')
+                else:
+                    api('POST', 'articulos', data={
+                        'codigo': codigo, 'nombre': nombre,
+                        'precio_1': float(precio_1), 'precio_2': float(precio_2),
+                        'precio_3': float(precio_3)
+                    }, prefer='return=minimal')
+                    refresh()
+                    st.session_state['articulo_creado_mensaje'] = f'Artículo {codigo} · {nombre} guardado correctamente.'
+                    st.rerun()
+            except RuntimeError as exc:
+                st.error(f'No se pudo guardar el artículo: {exc}')
+
+
 page = st.sidebar.radio('Menú', ['Nuevo pedido','Pedidos guardados','Exportar Excel','Administración','Usuarios'] if st.session_state.role == 'admin' else ['Nuevo pedido','Mis pedidos'])
 
 if page == 'Nuevo pedido':
@@ -654,6 +693,11 @@ else:
     st.info('Clientes, artículos y pedidos se guardan en Supabase. Importar Excel actualiza solo los registros con diferencias.')
     formulario_alta_cliente('administracion')
     st.divider()
+    if st.session_state.get('articulo_creado_mensaje'):
+        st.success(st.session_state.pop('articulo_creado_mensaje'))
+    formulario_alta_articulo()
+    st.divider()
+    st.subheader('Importación por Excel (opción existente)')
     for kind, title, cols in [('clientes','Clientes',['codigo','nombre']),('articulos','Artículos',['codigo','nombre','precio_1','precio_2','precio_3'])]:
         st.subheader(title)
         current=query(f'SELECT codigo,nombre FROM clientes ORDER BY codigo' if kind == 'clientes' else 'SELECT * FROM articulos ORDER BY codigo')
