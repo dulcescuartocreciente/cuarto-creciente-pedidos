@@ -17,7 +17,12 @@ BASE = Path(__file__).resolve().parent
 TZ = ZoneInfo('America/Argentina/Buenos_Aires')
 
 st.set_page_config(page_title='Cuarto Creciente | Pedidos', page_icon='📦', layout='wide')
-st.markdown('''<style>.block-container{padding-top:1.1rem;max-width:1250px} [data-testid="stMetric"]{background:#f2f6fa;padding:12px;border-radius:12px} </style>''', unsafe_allow_html=True)
+st.markdown('''<style>.block-container{padding-top:1.1rem;max-width:1250px}
+[data-testid="stMetric"]{background:#edf3fa !important;padding:12px;border-radius:12px}
+[data-testid="stMetric"] * {color:#14283e !important;opacity:1 !important}
+@media(max-width:767px){[data-testid="stMetric"]{min-height:85px;padding:10px}
+[data-testid="stMetric"] [data-testid="stMetricValue"]{font-size:1.35rem !important}}
+</style>''', unsafe_allow_html=True)
 def show_logo():
     for path in (BASE / 'logo.png', BASE / 'assets' / 'logo.png'):
         if path.is_file():
@@ -215,7 +220,7 @@ def query(sql, params=()):
             elif name == 'articulos':
                 schema = 'codigo TEXT, nombre TEXT, precio_1 REAL, precio_2 REAL, precio_3 REAL, activo INTEGER, actualizado_en TEXT'
             elif name == 'pedidos':
-                schema = 'id INTEGER, fecha TEXT, cliente_codigo TEXT, cliente_nombre TEXT, lista TEXT, vendedor TEXT, pct_comun REAL, pct_x REAL, estado TEXT'
+                schema = 'id INTEGER, fecha TEXT, cliente_codigo TEXT, cliente_nombre TEXT, lista TEXT, vendedor TEXT, pct_comun REAL, pct_x REAL, estado TEXT, descuento_pct REAL, observaciones TEXT'
             else:
                 schema = 'id INTEGER, pedido_id INTEGER, articulo_codigo TEXT, articulo_nombre TEXT, cantidad INTEGER, precio REAL'
             con.execute(f'CREATE TABLE {name} ({schema})')
@@ -443,7 +448,7 @@ if page == 'Nuevo pedido':
         st.info(f'Cliente: {c.nombre} · Código: {cliente}')
         lista = st.selectbox(
             'Lista de precios para este pedido',
-            ['Lista 1', 'Lista 2', 'Lista 3'],
+            ['Lista 1', 'Lista 2', 'Lista 3', 'Precio manual / Supermercados'],
             help='El vendedor selecciona la lista según el volumen negociado. Se guarda con el pedido.'
         )
         st.caption('Lista 1: general · Lista 2: más de 300 bultos · Lista 3: pallet completo / línea de producción. Verificá las condiciones comerciales antes de guardar.')
@@ -460,49 +465,88 @@ if page == 'Nuevo pedido':
         a.number_input('Factura común (%)', min_value=0.0, max_value=100.0, step=5.0, key='pct_comun', on_change=update_comun)
         b.number_input('Factura X (%)', min_value=0.0, max_value=100.0, step=5.0, key='pct_x', on_change=update_x)
         st.caption('Ambos porcentajes se guardan como información administrativa. No se generan comprobantes fiscales.')
+        if st.session_state.pop('reiniciar_datos_comerciales', False):
+            st.session_state.descuento_pedido = 0.0
+            st.session_state.observaciones_pedido = ''
+        descuento_pct = st.number_input('Descuento comercial (%)', min_value=0.0, max_value=100.0,
+                                       value=0.0, step=0.5, format='%.2f', key='descuento_pedido')
+        observaciones = st.text_area('Observaciones del pedido', key='observaciones_pedido',
+                                     placeholder='Indicaciones de entrega, condiciones especiales, etc.', max_chars=2000)
+        modo_manual = lista == 'Precio manual / Supermercados'
+        if modo_manual:
+            st.info('Ingresá el precio por bulto de cada artículo solicitado. No se modificarán las listas generales.')
         st.subheader('Artículos')
         st.caption('Escribí los bultos al lado de cada artículo. Dejá 0 para no incluirlo en el pedido.')
         if 'carrito' not in st.session_state:
             st.session_state.carrito = {}
-        # Reiniciar cantidades al comienzo de la ejecución siguiente, antes de crear widgets.
+        if 'precios_manual' not in st.session_state:
+            st.session_state.precios_manual = {}
+        # El carrito es independiente de los widgets: sobrevive a búsquedas,
+        # reruns y al desmontaje de campos en pantallas móviles.
         if st.session_state.pop('reiniciar_cantidades_pedido', False):
+            st.session_state.carrito = {}
+            st.session_state.precios_manual = {}
             for code in lookup_a:
                 st.session_state[f'cantidad_art_{code}'] = 0
-        # Una casilla por código; el valor se conserva al buscar y al cambiar la lista.
-        for code in lookup_a:
-            widget_key = f'cantidad_art_{code}'
-            if widget_key not in st.session_state:
-                st.session_state[widget_key] = int(st.session_state.carrito.get(code, 0))
-        buscar_articulo = st.text_input('🔎 Buscar por código o nombre', placeholder='Ej.: JBP1400 o mermelada', key='buscar_lista_articulos')
+                st.session_state[f'precio_manual_{code}'] = 0.0
+
+        def guardar_cantidad(codigo):
+            st.session_state.carrito[codigo] = int(st.session_state.get(f'cantidad_art_{codigo}', 0))
+
+        def guardar_precio_manual(codigo):
+            st.session_state.precios_manual[codigo] = float(st.session_state.get(f'precio_manual_{codigo}', 0.0))
+
+        buscar_articulo = st.text_input('🔎 Buscar por código o nombre',
+            placeholder='Ej.: JBP1400 o mermelada', key='buscar_lista_articulos')
         filtro = buscar_articulo.strip().casefold()
-        visibles = [r for r in articulos.itertuples(index=False) if filtro in str(r.codigo).casefold() or filtro in str(r.nombre).casefold()]
+        visibles = [r for r in articulos.itertuples(index=False)
+                    if filtro in str(r.codigo).casefold() or filtro in str(r.nombre).casefold()]
         st.caption(f'Mostrando {len(visibles)} de {len(articulos)} artículos')
         with st.container(height=440, border=True):
             for art in visibles:
+                code = str(art.codigo)
+                clave_cantidad = f'cantidad_art_{code}'
+                if clave_cantidad not in st.session_state:
+                    st.session_state[clave_cantidad] = int(st.session_state.carrito.get(code, 0))
                 col_art, col_precio, col_cant = st.columns([5, 2, 2], vertical_alignment='center')
                 with col_art:
                     st.markdown(f'**{art.codigo}** · {art.nombre}')
                 with col_precio:
-                    precio_art = float(getattr(art, 'precio_' + lista[-1]))
-                    st.caption(f'$ {precio_art:,.2f} / bulto')
+                    if modo_manual:
+                        clave_precio = f'precio_manual_{code}'
+                        if clave_precio not in st.session_state:
+                            st.session_state[clave_precio] = float(st.session_state.precios_manual.get(code, 0.0))
+                        st.number_input(f'Precio manual · {code}', min_value=0.0,
+                            step=1.0, format='%.2f', key=clave_precio,
+                            on_change=guardar_precio_manual, args=(code,))
+                    else:
+                        precio_art = float(getattr(art, 'precio_' + lista[-1]))
+                        st.caption(f'$ {precio_art:,.2f} / bulto')
                 with col_cant:
-                    st.number_input(f'Bultos · {art.codigo}', min_value=0, max_value=100000, step=1, key=f'cantidad_art_{art.codigo}', label_visibility='collapsed')
+                    st.number_input(f'Bultos · {code}', min_value=0, max_value=100000,
+                        step=1, key=clave_cantidad, on_change=guardar_cantidad,
+                        args=(code,), label_visibility='collapsed')
         rows = []
         for code, item in lookup_a.items():
-            qty = int(st.session_state.get(f'cantidad_art_{code}', 0))
+            qty = int(st.session_state.carrito.get(str(code), 0))
             if qty > 0:
-                price = float(getattr(item, 'precio_' + lista[-1]))
-                rows.append({'Código artículo':code,'Artículo':item.nombre,'Bultos':qty,'Precio/bulto':price,'Importe':qty*price})
+                price = (float(st.session_state.precios_manual.get(str(code), 0.0))
+                         if modo_manual else float(getattr(item, 'precio_' + lista[-1])))
+                rows.append({'Código artículo': code, 'Artículo': item.nombre,
+                             'Bultos': qty, 'Precio/bulto': price, 'Importe': qty * price})
         total_bultos = sum(r['Bultos'] for r in rows)
         total_importe = sum(r['Importe'] for r in rows)
+        total_con_descuento = round(total_importe * (1 - descuento_pct / 100), 2)
         pct_x = float(st.session_state.pct_x)
         pct_comun = float(st.session_state.pct_comun)
         st.subheader('Resumen del pedido')
         f_x, f_comun, f_total = st.columns(3)
-        f_x.metric('Factura X', f'$ {total_importe * pct_x / 100:,.2f}')
-        f_comun.metric('Factura común', f'$ {total_importe * pct_comun / 100:,.2f}')
-        f_total.metric('TOTAL', f'$ {total_importe:,.2f}')
+        f_x.metric('Factura X', f'$ {total_con_descuento * pct_x / 100:,.2f}')
+        f_comun.metric('Factura común', f'$ {total_con_descuento * pct_comun / 100:,.2f}')
+        f_total.metric('TOTAL con descuento', f'$ {total_con_descuento:,.2f}')
         st.metric('Total de bultos', total_bultos)
+        if descuento_pct:
+            st.caption(f'Subtotal: $ {total_importe:,.2f} · Descuento: {descuento_pct:.2f}%')
         if rows:
             with st.expander(f'Ver detalle de los {len(rows)} artículos seleccionados'):
                 st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -510,6 +554,8 @@ if page == 'Nuevo pedido':
             st.info('Todavía no ingresaste cantidades. Escribí los bultos junto a los artículos.')
         if st.button('💾 Guardar pedido', type='primary', disabled=not rows):
             if not vendedor.strip(): st.error('Indicá el vendedor.')
+            elif modo_manual and any(r['Precio/bulto'] <= 0 for r in rows):
+                st.error('En precio manual, todos los artículos con bultos deben tener precio mayor a cero.')
             elif round(st.session_state.pct_comun+st.session_state.pct_x,2)!=100:
                 st.error('Los porcentajes deben sumar 100%.')
             else:
@@ -522,15 +568,40 @@ if page == 'Nuevo pedido':
                                     'articulo_nombre': r['Artículo'],
                                     'cantidad': r['Bultos'], 'precio': r['Precio/bulto']}
                                    for r in rows]})
+                # La función SQL de creación existente se conserva; se agregan
+                # descuento y observaciones al pedido recién creado.
+                try:
+                    api('PATCH', 'pedidos', params={'id': f'eq.{int(pid)}'},
+                        data={'descuento_pct': float(descuento_pct),
+                              'observaciones': observaciones.strip()})
+                except RuntimeError:
+                    st.error(f'El pedido #{pid} se creó, pero NO se pudieron guardar descuento y observaciones. Revisalo en Administración.')
+                    st.stop()
                 refresh()
-                st.session_state.carrito={}
+                st.session_state.carrito = {}
+                st.session_state.precios_manual = {}
                 st.session_state.reiniciar_cantidades_pedido = True
+                st.session_state.reiniciar_datos_comerciales = True
                 st.success(f'Pedido #{pid} guardado correctamente. Para iniciar otro pedido, actualizá la pantalla.')
                 st.caption('No se descuenta stock: la asignación se realizará en Distribución Inteligente.')
 
 elif page in ('Pedidos guardados', 'Mis pedidos'):
     st.header('Pedidos guardados')
-    pedidos=query('SELECT p.id,p.fecha,p.cliente_codigo,p.cliente_nombre,p.lista,p.vendedor,p.pct_comun,p.pct_x,p.estado,COALESCE(SUM(r.cantidad),0) AS bultos FROM pedidos p LEFT JOIN renglones r ON r.pedido_id=p.id WHERE (? = \'admin\' OR p.vendedor = ?) GROUP BY p.id ORDER BY p.id DESC', (st.session_state.role, st.session_state.username))
+    pedidos=query('SELECT p.id,p.fecha,p.cliente_codigo,p.cliente_nombre,p.lista,p.vendedor,p.pct_comun,p.pct_x,p.estado,p.descuento_pct,p.observaciones,COALESCE(SUM(r.cantidad),0) AS bultos FROM pedidos p LEFT JOIN renglones r ON r.pedido_id=p.id WHERE (? = \'admin\' OR p.vendedor = ?) GROUP BY p.id ORDER BY p.id DESC', (st.session_state.role, st.session_state.username))
+    st.subheader('Buscar historial por cliente')
+    buscar_cliente_historial = st.text_input('Buscar cliente por nombre o código',
+        placeholder='Escribí el cliente para ver sus pedidos', key='buscador_historial_cliente')
+    if buscar_cliente_historial.strip() and not pedidos.empty:
+        termino = buscar_cliente_historial.strip()
+        historial = pedidos[
+            pedidos['cliente_nombre'].astype(str).str.contains(termino, case=False, regex=False, na=False)
+            | pedidos['cliente_codigo'].astype(str).str.contains(termino, case=False, regex=False, na=False)
+        ]
+        if historial.empty:
+            st.info('No se encontraron pedidos de ese cliente.')
+        else:
+            st.dataframe(historial, use_container_width=True, hide_index=True)
+            st.caption(f'{len(historial)} pedidos encontrados. Elegí uno abajo para ver sus artículos.')
     if st.session_state.role == 'admin' and not pedidos.empty:
         st.subheader('Gestión masiva de estados')
         st.caption('Seleccioná pedidos con las casillas y aplicá un estado a todos los seleccionados. Los cambios se guardan en Supabase.')
@@ -577,7 +648,16 @@ elif page in ('Pedidos guardados', 'Mis pedidos'):
     else:
         st.dataframe(pedidos, use_container_width=True, hide_index=True)
     if not pedidos.empty:
-        pid=st.selectbox('Ver o editar pedido', pedidos['id'].tolist())
+        pedidos_disponibles = pedidos
+        if buscar_cliente_historial.strip():
+            termino = buscar_cliente_historial.strip()
+            pedidos_disponibles = pedidos[
+                pedidos['cliente_nombre'].astype(str).str.contains(termino, case=False, regex=False, na=False)
+                | pedidos['cliente_codigo'].astype(str).str.contains(termino, case=False, regex=False, na=False)
+            ]
+        pid = st.selectbox('Ver o editar pedido', pedidos_disponibles['id'].tolist()) if not pedidos_disponibles.empty else None
+        if pid is None:
+            st.stop()
         detalle=query('SELECT articulo_codigo,articulo_nombre,cantidad,precio FROM renglones WHERE pedido_id=?',(int(pid),))
         st.dataframe(detalle, hide_index=True, use_container_width=True)
         if st.session_state.role == 'admin':
@@ -603,7 +683,7 @@ elif page in ('Pedidos guardados', 'Mis pedidos'):
 elif page == 'Exportar Excel':
     st.header('Exportación para Distribución Inteligente')
     st.caption('Se exporta la demanda total, sin separar los artículos por tipo de facturación.')
-    df=query('''SELECT p.id AS pedido,p.fecha,p.cliente_codigo,p.cliente_nombre,p.lista,p.vendedor,p.pct_comun,p.pct_x,p.estado,r.articulo_codigo,r.articulo_nombre,r.cantidad AS bultos,r.precio,(r.cantidad*r.precio) AS importe FROM pedidos p JOIN renglones r ON p.id=r.pedido_id ORDER BY p.id,r.articulo_codigo''')
+    df=query('''SELECT p.id AS pedido,p.fecha,p.cliente_codigo,p.cliente_nombre,p.lista,p.vendedor,p.pct_comun,p.pct_x,p.estado,p.descuento_pct,p.observaciones,r.articulo_codigo,r.articulo_nombre,r.cantidad AS bultos,r.precio,(r.cantidad*r.precio) AS importe_bruto,ROUND(r.cantidad*r.precio*(1-COALESCE(p.descuento_pct,0)/100.0),2) AS importe FROM pedidos p JOIN renglones r ON p.id=r.pedido_id ORDER BY p.id,r.articulo_codigo''')
     if df.empty: st.info('No hay pedidos para exportar todavía.')
     else:
         opciones_estado = sorted(df.estado.dropna().unique().tolist())
