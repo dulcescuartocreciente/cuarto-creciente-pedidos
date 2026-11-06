@@ -714,11 +714,70 @@ elif page == 'Exportar Excel':
             expedicion = expedicion[['CODIGO', 'DESCRIPCION', 'CANTIDAD', 'CLIENTE']]
             expedicion = expedicion.sort_values(['CLIENTE', 'CODIGO'], kind='stable').reset_index(drop=True)
             st.dataframe(expedicion, use_container_width=True, hide_index=True)
-            st.download_button('⬇️ Descargar Excel para Distribuidor',
-                data=excel_bytes({'Distribuidor': expedicion}),
-                file_name=f'distribuidor_cuarto_creciente_{datetime.now(TZ):%Y%m%d_%H%M}.xlsx',
-                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                type='primary', key='descargar_expedicion')
+            # Facturación independiente de la matriz y del archivo de logística.
+            # Ambas descargas usan exactamente los mismos pedidos/estados filtrados.
+            facturacion = dff[[
+                'pedido', 'fecha', 'cliente_codigo', 'cliente_nombre', 'vendedor',
+                'lista', 'estado', 'articulo_codigo', 'articulo_nombre', 'bultos',
+                'precio', 'importe_bruto', 'descuento_pct', 'pct_comun', 'pct_x',
+                'observaciones'
+            ]].copy()
+            for campo in ('precio', 'importe_bruto', 'descuento_pct', 'pct_comun', 'pct_x'):
+                facturacion[campo] = pd.to_numeric(facturacion[campo], errors='coerce').fillna(0.0)
+            facturacion['importe_neto'] = (
+                facturacion['importe_bruto'] * (1 - facturacion['descuento_pct'] / 100)
+            ).round(2)
+            facturacion['importe_factura_comun'] = (
+                facturacion['importe_neto'] * facturacion['pct_comun'] / 100
+            ).round(2)
+            facturacion['importe_factura_x'] = (
+                facturacion['importe_neto'] - facturacion['importe_factura_comun']
+            ).round(2)
+            facturacion = facturacion.rename(columns={
+                'pedido': 'PEDIDO', 'fecha': 'FECHA',
+                'cliente_codigo': 'CODIGO CLIENTE', 'cliente_nombre': 'CLIENTE',
+                'vendedor': 'VENDEDOR', 'lista': 'LISTA', 'estado': 'ESTADO',
+                'articulo_codigo': 'CODIGO ARTICULO', 'articulo_nombre': 'ARTICULO',
+                'bultos': 'BULTOS', 'precio': 'PRECIO UNITARIO',
+                'importe_bruto': 'SUBTOTAL', 'descuento_pct': 'DESCUENTO %',
+                'pct_comun': 'FACTURA COMUN %', 'pct_x': 'FACTURA X %',
+                'observaciones': 'OBSERVACIONES', 'importe_neto': 'TOTAL NETO',
+                'importe_factura_comun': 'IMPORTE FACTURA COMUN',
+                'importe_factura_x': 'IMPORTE FACTURA X'
+            })
+            facturacion = facturacion[[
+                'PEDIDO', 'FECHA', 'CODIGO CLIENTE', 'CLIENTE', 'VENDEDOR',
+                'LISTA', 'ESTADO', 'CODIGO ARTICULO', 'ARTICULO', 'BULTOS',
+                'PRECIO UNITARIO', 'SUBTOTAL', 'DESCUENTO %', 'TOTAL NETO',
+                'FACTURA COMUN %', 'IMPORTE FACTURA COMUN', 'FACTURA X %',
+                'IMPORTE FACTURA X', 'OBSERVACIONES'
+            ]]
+            resumen_facturacion = facturacion.groupby(
+                ['PEDIDO', 'FECHA', 'CODIGO CLIENTE', 'CLIENTE', 'VENDEDOR',
+                 'LISTA', 'ESTADO', 'DESCUENTO %', 'FACTURA COMUN %',
+                 'FACTURA X %', 'OBSERVACIONES'],
+                as_index=False, dropna=False, sort=False
+            ).agg({
+                'BULTOS': 'sum', 'SUBTOTAL': 'sum', 'TOTAL NETO': 'sum',
+                'IMPORTE FACTURA COMUN': 'sum', 'IMPORTE FACTURA X': 'sum'
+            })
+            st.subheader('🧾 Facturación para despacho')
+            st.caption('Detalle por pedido y artículo, con precios, descuento, distribución de facturación y observaciones. Incluye resumen por pedido.')
+            st.dataframe(resumen_facturacion, use_container_width=True, hide_index=True)
+            col_distribuidor, col_facturacion = st.columns(2)
+            with col_distribuidor:
+                st.download_button('⬇️ Excel para Distribuidor',
+                    data=excel_bytes({'Distribuidor': expedicion}),
+                    file_name=f'distribuidor_cuarto_creciente_{datetime.now(TZ):%Y%m%d_%H%M}.xlsx',
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    type='primary', key='descargar_expedicion', use_container_width=True)
+            with col_facturacion:
+                st.download_button('⬇️ Excel de Facturación',
+                    data=excel_bytes({'Detalle facturacion': facturacion,
+                                      'Resumen por pedido': resumen_facturacion}),
+                    file_name=f'facturacion_despacho_{datetime.now(TZ):%Y%m%d_%H%M}.xlsx',
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    type='primary', key='descargar_facturacion', use_container_width=True)
             st.caption('La descarga completa se mantiene separada. Los pedidos cancelados solo se incluyen si los seleccionás.')
 
 elif page == 'Usuarios':
