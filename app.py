@@ -587,7 +587,7 @@ if page == 'Nuevo pedido':
 
 elif page in ('Pedidos guardados', 'Mis pedidos'):
     st.header('Pedidos guardados')
-    pedidos=query('SELECT p.id,p.fecha,p.cliente_codigo,p.cliente_nombre,p.lista,p.vendedor,p.pct_comun,p.pct_x,p.estado,p.descuento_pct,p.observaciones,COALESCE(SUM(r.cantidad),0) AS bultos FROM pedidos p LEFT JOIN renglones r ON r.pedido_id=p.id WHERE (? = \'admin\' OR p.vendedor = ?) GROUP BY p.id ORDER BY p.id DESC', (st.session_state.role, st.session_state.username))
+    pedidos=query('SELECT p.id,p.fecha,p.cliente_codigo,p.cliente_nombre,p.lista,p.vendedor,p.pct_comun,p.pct_x,p.estado,p.descuento_pct,p.observaciones,COALESCE(SUM(r.cantidad),0) AS bultos,ROUND(COALESCE(SUM(r.cantidad * r.precio),0) * (1 - COALESCE(p.descuento_pct,0)/100.0),2) AS monto_venta FROM pedidos p LEFT JOIN renglones r ON r.pedido_id=p.id WHERE (? = \'admin\' OR p.vendedor = ?) GROUP BY p.id ORDER BY p.id DESC', (st.session_state.role, st.session_state.username))
     st.subheader('Buscar historial por cliente')
     buscar_cliente_historial = st.text_input('Buscar cliente por nombre o código',
         placeholder='Escribí el cliente para ver sus pedidos', key='buscador_historial_cliente')
@@ -600,7 +600,8 @@ elif page in ('Pedidos guardados', 'Mis pedidos'):
         if historial.empty:
             st.info('No se encontraron pedidos de ese cliente.')
         else:
-            st.dataframe(historial, use_container_width=True, hide_index=True)
+            st.dataframe(historial, use_container_width=True, hide_index=True,
+                column_config={'monto_venta': st.column_config.NumberColumn('Monto de venta', format='$ %.2f')})
             st.caption(f'{len(historial)} pedidos encontrados. Elegí uno abajo para ver sus artículos.')
     if st.session_state.role == 'admin' and not pedidos.empty:
         st.subheader('Gestión masiva de estados')
@@ -614,7 +615,7 @@ elif page in ('Pedidos guardados', 'Mis pedidos'):
                 for numero in ids_visibles:
                     st.session_state[f'marcar_pedido_{numero}'] = True
                 st.rerun()
-            seleccion = vista[['id', 'fecha', 'cliente_codigo', 'cliente_nombre', 'vendedor', 'bultos', 'estado']].copy()
+            seleccion = vista[['id', 'fecha', 'cliente_codigo', 'cliente_nombre', 'vendedor', 'bultos', 'monto_venta', 'estado']].copy()
             seleccion.insert(0, 'Seleccionar', [bool(st.session_state.get(f'marcar_pedido_{int(numero)}', False)) for numero in seleccion['id']])
             # El editor usa una clave propia por filtro; se guardan las selecciones entre filtros.
             editado = st.data_editor(seleccion, hide_index=True, use_container_width=True,
@@ -646,7 +647,8 @@ elif page in ('Pedidos guardados', 'Mis pedidos'):
         st.divider()
         st.subheader('Detalle de pedidos')
     else:
-        st.dataframe(pedidos, use_container_width=True, hide_index=True)
+        st.dataframe(pedidos, use_container_width=True, hide_index=True,
+            column_config={'monto_venta': st.column_config.NumberColumn('Monto de venta', format='$ %.2f')})
     if not pedidos.empty:
         pedidos_disponibles = pedidos
         if buscar_cliente_historial.strip():
