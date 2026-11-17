@@ -758,6 +758,41 @@ elif page in ('Pedidos guardados', 'Mis pedidos') and st.session_state.role in (
             st.stop()
         detalle=query('SELECT articulo_codigo,articulo_nombre,cantidad,precio FROM renglones WHERE pedido_id=?',(int(pid),))
         st.dataframe(detalle, hide_index=True, use_container_width=True)
+        # Descarga individual: se genera únicamente con el pedido seleccionado.
+        pedido_sel = pedidos.loc[pedidos['id'] == int(pid)].iloc[0]
+        detalle_excel = detalle.copy()
+        detalle_excel['cantidad'] = pd.to_numeric(detalle_excel['cantidad'], errors='coerce').fillna(0).astype(int)
+        detalle_excel['precio'] = pd.to_numeric(detalle_excel['precio'], errors='coerce').fillna(0.0)
+        detalle_excel['importe_bruto'] = (detalle_excel['cantidad'] * detalle_excel['precio']).round(2)
+        descuento_individual = float(pedido_sel.get('descuento_pct', 0) or 0)
+        detalle_excel['descuento_pct'] = descuento_individual
+        detalle_excel['importe_neto'] = (detalle_excel['importe_bruto'] * (1 - descuento_individual / 100)).round(2)
+        detalle_excel = detalle_excel.rename(columns={
+            'articulo_codigo': 'Código artículo', 'articulo_nombre': 'Artículo',
+            'cantidad': 'Bultos', 'precio': 'Precio por bulto ($)',
+            'importe_bruto': 'Importe bruto ($)', 'descuento_pct': 'Descuento (%)',
+            'importe_neto': 'Importe neto ($)'})
+        bruto_pedido = round(float(detalle_excel['Importe bruto ($)'].sum()), 2)
+        neto_pedido = round(bruto_pedido * (1 - descuento_individual / 100), 2)
+        resumen_individual = pd.DataFrame([{
+            'Pedido': int(pid), 'Fecha': str(pedido_sel['fecha']),
+            'Código cliente': str(pedido_sel['cliente_codigo']),
+            'Cliente': str(pedido_sel['cliente_nombre']),
+            'Vendedor': str(pedido_sel['vendedor']),
+            'Lista': str(pedido_sel['lista']), 'Estado': str(pedido_sel['estado']),
+            'Bultos': int(detalle_excel['Bultos'].sum()),
+            'Venta bruta ($)': bruto_pedido,
+            'Descuento (%)': descuento_individual,
+            'Total neto ($)': neto_pedido,
+            'Observaciones': str(pedido_sel.get('observaciones', '') or '')
+        }])
+        st.download_button(
+            '⬇️ Descargar este pedido en Excel',
+            data=excel_bytes({'Resumen pedido': resumen_individual,
+                              'Detalle artículos': detalle_excel}),
+            file_name=f'pedido_cuarto_creciente_{int(pid)}.xlsx',
+            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            key=f'descargar_pedido_individual_{int(pid)}', type='primary')
         if st.session_state.role == 'admin':
           with st.expander('Editar cantidades / estado'):
             cambios={}
@@ -880,14 +915,38 @@ elif page == 'Exportar Excel' and st.session_state.role == 'admin':
 
 
 elif page == 'Informes comerciales' and st.session_state.role in ('admin', 'admin1'):
-    # Segunda barrera de acceso: no se consulta ni muestra ningún informe antes de validarla.
+    # Segunda barrera: detectar configuración sin revelar nunca el secreto.
+    clave_informes = ''
+    origen_clave = ''
     try:
-        clave_informes = str(st.secrets.get('INFORMES_COMERCIALES_PASSWORD', ''))
-    except (KeyError, FileNotFoundError):
-        clave_informes = ''
+        # Clave de nivel raíz (configuración recomendada).
+        valor = st.secrets.get('INFORMES_COMERCIALES_PASSWORD', '')
+        if isinstance(valor, str) and valor:
+            clave_informes = valor
+            origen_clave = 'raíz'
+        else:
+            # Algunas instalaciones guardan las claves debajo de [supabase], [database], etc.
+            # Permitimos localizarla sin mostrar el contenido ni pedir que se comparta.
+            for seccion, contenido in st.secrets.items():
+                if hasattr(contenido, 'get'):
+                    candidato = contenido.get('INFORMES_COMERCIALES_PASSWORD', '')
+                    if isinstance(candidato, str) and candidato:
+                        clave_informes = candidato
+                        origen_clave = f'sección [{seccion}]'
+                        break
+    except (KeyError, FileNotFoundError, OSError):
+        pass
+    if not clave_informes:
+        st.error('Informes comerciales bloqueados: la aplicación NO encuentra '
+                 'INFORMES_COMERCIALES_PASSWORD en los Secrets de este despliegue.')
+        st.info('Comprobá que estás editando los Secrets de esta misma aplicación en Streamlit Cloud. '
+                'Guardá los cambios y reiniciá la aplicación. No compartas la contraseña.')
+        st.stop()
     if len(clave_informes) < 12:
-        st.error('Informes comerciales bloqueados: configurá INFORMES_COMERCIALES_PASSWORD '
-                 'con al menos 12 caracteres en Streamlit Cloud → App settings → Secrets.')
+        st.error('Informes comerciales bloqueados: la contraseña fue encontrada '
+                 f'en {origen_clave}, pero tiene menos de 12 caracteres.')
+        st.info('Reemplazala por una clave de al menos 12 caracteres en Streamlit Secrets. '
+                'No es necesario cambiar nada en Supabase.')
         st.stop()
     if not st.session_state.get('informes_comerciales_autorizado', False):
         st.header('🔒 Acceso a informes comerciales')
