@@ -135,12 +135,12 @@ def login():
             elif remote_config():
                 try:
                     found = remote_users(username=username)
-                    if found and found[0].get('active') and found[0].get('role') == 'vendedor':
+                    if found and found[0].get('active') and found[0].get('role') in ('vendedor', 'admin1'):
                         user = found[0]
                 except RuntimeError:
                     st.error('No se pudo consultar Supabase para ingresar como vendedor. El administrador puede ingresar normalmente.')
                     return False
-            if user and check_password(password, user.get('password_hash', '')) and user.get('role') in ('admin', 'vendedor'):
+            if user and check_password(password, user.get('password_hash', '')) and user.get('role') in ('admin', 'vendedor', 'admin1'):
                 st.session_state.authenticated = True
                 st.session_state.username = username
                 st.session_state.role = user['role']
@@ -154,11 +154,24 @@ def login():
 if not login():
     st.stop()
 
+# Revalidar cuentas remotas: desactivar Admin1 o un vendedor revoca el acceso.
+if st.session_state.get('role') in ('admin1', 'vendedor'):
+    try:
+        validacion = remote_users(username=st.session_state.username)
+        if (not validacion or not validacion[0].get('active') or
+                validacion[0].get('role') != st.session_state.role):
+            st.session_state.clear()
+            st.error('La cuenta fue desactivada o cambió de perfil. Ingresá nuevamente.')
+            st.stop()
+    except RuntimeError:
+        st.error('No se pudo verificar el permiso del usuario en Supabase.')
+        st.stop()
+
 show_logo()
 st.caption('Sistema de pedidos · Cuarto Creciente S.A.')
 with st.sidebar:
     st.write(f"**{st.session_state.display_name}**")
-    st.caption('Administrador' if st.session_state.role == 'admin' else 'Vendedor')
+    st.caption({'admin':'Administrador principal', 'admin1':'Admin1 · Informes comerciales', 'vendedor':'Vendedor'}.get(st.session_state.role, 'Sin rol'))
     st.link_button('📊 Seguimiento de pedidos (Drive)', 'https://docs.google.com/spreadsheets/d/1mRNTiXaUAF-lm5q0D1zr5zUPu7XrtN0FvH1u2lwVotw/edit?gid=0#gid=0', use_container_width=True)
     if st.button('Cerrar sesión'):
         st.session_state.clear()
@@ -325,7 +338,7 @@ def formulario_alta_cliente(origen):
         nuevo_codigo = st.text_input('Código del cliente', key=f'codigo_cliente_{origen}',
                                      help='Usá el código del sistema comercial; se conservan los ceros iniciales.')
         nuevo_nombre = st.text_input('Nombre o razón social', key=f'nombre_cliente_{origen}')
-        guardar_cliente = st.form_submit_button('Guardar nuevo cliente', type='primary')
+        guardar_cliente = st.form_submit_button('Aceptar y guardar nuevo cliente', type='primary')
     if guardar_cliente:
         codigo_limpio = nuevo_codigo.strip()
         nombre_limpio = nuevo_nombre.strip()
@@ -362,7 +375,7 @@ def formulario_alta_articulo():
             precio_2 = st.number_input('Precio lista 2 ($)', min_value=0.0, step=1.0, format='%.2f')
         with c3:
             precio_3 = st.number_input('Precio lista 3 ($)', min_value=0.0, step=1.0, format='%.2f')
-        guardar = st.form_submit_button('Guardar artículo', type='primary')
+        guardar = st.form_submit_button('Aceptar y guardar artículo', type='primary')
     if guardar:
         codigo, nombre = codigo.strip(), nombre.strip()
         if not codigo or not nombre:
@@ -387,9 +400,90 @@ def formulario_alta_articulo():
                 st.error(f'No se pudo guardar el artículo: {exc}')
 
 
-page = st.sidebar.radio('Menú', ['Nuevo pedido','Pedidos guardados','Exportar Excel','Administración','Usuarios'] if st.session_state.role == 'admin' else ['Nuevo pedido','Mis pedidos'])
+def formulario_editar_cliente():
+    """Corrección de clientes por administradores; conserva los pedidos históricos."""
+    st.subheader('✏️ Corregir cliente existente')
+    clientes_actuales = query('SELECT codigo,nombre FROM clientes ORDER BY nombre')
+    if clientes_actuales.empty:
+        st.info('No hay clientes cargados.')
+        return
+    nombres = dict(zip(clientes_actuales['codigo'].astype(str), clientes_actuales['nombre'].astype(str)))
+    with st.form('editar_cliente_admin'):
+        codigo = st.selectbox('Cliente a corregir', list(nombres),
+                              format_func=lambda x: f'{x} · {nombres[x]}')
+        nombre_nuevo = st.text_input('Nombre o razón social corregida',
+                                    value=nombres[codigo], key=f'cliente_nombre_editar_{codigo}')
+        aceptar = st.form_submit_button('Aceptar y guardar cliente', type='primary')
+    if aceptar:
+        nombre_nuevo = nombre_nuevo.strip()
+        if not nombre_nuevo or len(nombre_nuevo) > 250:
+            st.error('Ingresá un nombre válido (hasta 250 caracteres).')
+        else:
+            try:
+                api('PATCH', 'clientes', params={'codigo': f'eq.{codigo}'},
+                    data={'nombre': nombre_nuevo}, prefer='return=minimal')
+                refresh()
+                st.success('Cliente corregido. Los pedidos anteriores conservan el nombre registrado al crearlos.')
+                st.rerun()
+            except RuntimeError as exc:
+                st.error(f'No se pudo modificar el cliente: {exc}')
+    st.caption('El código del cliente no se cambia aquí porque puede estar vinculado a pedidos. '
+               'Si hay un error de código, se debe corregir de manera controlada en la base de datos.')
 
-if page == 'Nuevo pedido':
+
+def formulario_editar_articulo():
+    """Actualiza descripción y las tres listas sin modificar precios históricos."""
+    st.subheader('✏️ Corregir artículo y listas de precios')
+    articulos_actuales = query(
+        'SELECT codigo,nombre,precio_1,precio_2,precio_3 FROM articulos ORDER BY nombre')
+    if articulos_actuales.empty:
+        st.info('No hay artículos cargados.')
+        return
+    lookup = {str(r.codigo): r for r in articulos_actuales.itertuples(index=False)}
+    codigo = st.selectbox('Artículo a corregir', list(lookup),
+                          format_func=lambda x: f'{x} · {lookup[x].nombre}',
+                          key='articulo_para_editar')
+    item = lookup[codigo]
+    with st.form(f'editar_articulo_admin_{codigo}'):
+        nombre = st.text_input('Descripción corregida', value=str(item.nombre))
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            p1 = st.number_input('Lista 1 ($)', min_value=0.0,
+                                 value=float(item.precio_1), step=1.0, format='%.2f')
+        with c2:
+            p2 = st.number_input('Lista 2 ($)', min_value=0.0,
+                                 value=float(item.precio_2), step=1.0, format='%.2f')
+        with c3:
+            p3 = st.number_input('Lista 3 ($)', min_value=0.0,
+                                 value=float(item.precio_3), step=1.0, format='%.2f')
+        aceptar = st.form_submit_button('Aceptar y guardar precios', type='primary')
+    if aceptar:
+        nombre = nombre.strip()
+        if not nombre or len(nombre) > 250:
+            st.error('Ingresá una descripción válida (hasta 250 caracteres).')
+        else:
+            try:
+                api('PATCH', 'articulos', params={'codigo': f'eq.{codigo}'},
+                    data={'nombre': nombre, 'precio_1': float(p1),
+                          'precio_2': float(p2), 'precio_3': float(p3)},
+                    prefer='return=minimal')
+                refresh()
+                st.success('Artículo y precios actualizados. Los pedidos anteriores conservan sus precios.')
+                st.rerun()
+            except RuntimeError as exc:
+                st.error(f'No se pudo modificar el artículo: {exc}')
+    st.caption('El código del artículo se conserva para no romper las referencias de pedidos existentes.')
+
+
+if st.session_state.role == 'admin':
+    menu = ['Nuevo pedido', 'Pedidos guardados', 'Exportar Excel', 'Informes comerciales', 'Administración', 'Usuarios']
+elif st.session_state.role == 'admin1':
+    menu = ['Informes comerciales']
+else:
+    menu = ['Nuevo pedido', 'Mis pedidos']
+page = st.sidebar.radio('Menú', menu)
+
+if page == 'Nuevo pedido' and st.session_state.role in ('admin', 'vendedor'):
     st.header('Nuevo pedido')
     # Indicadores globales: un cliente se cuenta una sola vez aunque tenga varios pedidos.
     resumen_clientes = query('''SELECT
@@ -426,8 +520,9 @@ if page == 'Nuevo pedido':
         a1, a2 = st.columns(2)
         a1.metric('Mis clientes atendidos', int(propios['clientes']))
         a2.metric('Mis pedidos realizados', int(propios['pedidos']))
-    with st.expander('➕ ¿El cliente no existe? Dar de alta un cliente nuevo'):
-        formulario_alta_cliente('vendedor' if st.session_state.role == 'vendedor' else 'nuevo_pedido')
+    if st.session_state.role == 'admin':
+        with st.expander('➕ Dar de alta un cliente nuevo'):
+            formulario_alta_cliente('nuevo_pedido')
     clientes = query('SELECT * FROM clientes ORDER BY nombre')
     articulos = query('SELECT * FROM articulos ORDER BY nombre')
     if clientes.empty or articulos.empty:
@@ -585,7 +680,7 @@ if page == 'Nuevo pedido':
                 st.success(f'Pedido #{pid} guardado correctamente. Para iniciar otro pedido, actualizá la pantalla.')
                 st.caption('No se descuenta stock: la asignación se realizará en Distribución Inteligente.')
 
-elif page in ('Pedidos guardados', 'Mis pedidos'):
+elif page in ('Pedidos guardados', 'Mis pedidos') and st.session_state.role in ('admin', 'vendedor'):
     st.header('Pedidos guardados')
     pedidos=query('SELECT p.id,p.fecha,p.cliente_codigo,p.cliente_nombre,p.lista,p.vendedor,p.pct_comun,p.pct_x,p.estado,p.descuento_pct,p.observaciones,COALESCE(SUM(r.cantidad),0) AS bultos,ROUND(COALESCE(SUM(r.cantidad * r.precio),0) * (1 - COALESCE(p.descuento_pct,0)/100.0),2) AS monto_venta FROM pedidos p LEFT JOIN renglones r ON r.pedido_id=p.id WHERE (? = \'admin\' OR p.vendedor = ?) GROUP BY p.id ORDER BY p.id DESC', (st.session_state.role, st.session_state.username))
     st.subheader('Buscar historial por cliente')
@@ -682,7 +777,7 @@ elif page in ('Pedidos guardados', 'Mis pedidos'):
                 st.success('Pedido actualizado.')
                 st.rerun()
 
-elif page == 'Exportar Excel':
+elif page == 'Exportar Excel' and st.session_state.role == 'admin':
     st.header('Exportación para Distribución Inteligente')
     st.caption('Se exporta la demanda total, sin separar los artículos por tipo de facturación.')
     df=query('''SELECT p.id AS pedido,p.fecha,p.cliente_codigo,p.cliente_nombre,p.lista,p.vendedor,p.pct_comun,p.pct_x,p.estado,p.descuento_pct,p.observaciones,r.articulo_codigo,r.articulo_nombre,r.cantidad AS bultos,r.precio,(r.cantidad*r.precio) AS importe_bruto,ROUND(r.cantidad*r.precio*(1-COALESCE(p.descuento_pct,0)/100.0),2) AS importe FROM pedidos p JOIN renglones r ON p.id=r.pedido_id ORDER BY p.id,r.articulo_codigo''')
@@ -782,9 +877,94 @@ elif page == 'Exportar Excel':
                     type='primary', key='descargar_facturacion', use_container_width=True)
             st.caption('La descarga completa se mantiene separada. Los pedidos cancelados solo se incluyen si los seleccionás.')
 
-elif page == 'Usuarios':
+
+elif page == 'Informes comerciales' and st.session_state.role in ('admin', 'admin1'):
+    st.header('📊 Informes comerciales · Ventas por vendedor')
+    st.caption('Ventas registradas por pedidos, calculadas a precios históricos y con descuento comercial. '
+               'No representan facturas emitidas ni entregas efectivas.')
+    datos = query("""SELECT p.id AS pedido, p.fecha, p.cliente_codigo, p.cliente_nombre,
+        p.vendedor, p.lista, p.estado, COALESCE(p.descuento_pct, 0) AS descuento_pct,
+        COALESCE(SUM(r.cantidad), 0) AS bultos,
+        ROUND(COALESCE(SUM(r.cantidad * r.precio), 0), 2) AS venta_bruta,
+        ROUND(COALESCE(SUM(r.cantidad * r.precio), 0) *
+              (1 - COALESCE(p.descuento_pct, 0) / 100.0), 2) AS venta_neta
+        FROM pedidos p LEFT JOIN renglones r ON r.pedido_id = p.id
+        GROUP BY p.id ORDER BY p.fecha DESC""")
+    if datos.empty:
+        st.info('Todavía no hay pedidos registrados para informar.')
+    else:
+        datos['fecha'] = pd.to_datetime(datos['fecha'], errors='coerce', utc=True)
+        datos['fecha_arg'] = datos['fecha'].dt.tz_convert(TZ).dt.date
+        fechas = datos['fecha_arg'].dropna()
+        if fechas.empty:
+            st.warning('No se pudieron interpretar las fechas de los pedidos.')
+            st.stop()
+        f1, f2 = st.columns(2)
+        with f1:
+            desde = st.date_input('Desde', value=fechas.min(), key='comercial_desde')
+        with f2:
+            hasta = st.date_input('Hasta', value=fechas.max(), key='comercial_hasta')
+        if desde > hasta:
+            st.error('La fecha Desde no puede ser posterior a Hasta.')
+            st.stop()
+        vendedores = sorted(datos['vendedor'].dropna().astype(str).unique().tolist())
+        seleccion_vendedores = st.multiselect('Vendedores', vendedores, default=vendedores,
+                                              key='comercial_vendedores')
+        estados = sorted(datos['estado'].dropna().astype(str).unique().tolist())
+        default_estados = [e for e in estados if e != 'Cancelado']
+        seleccion_estados = st.multiselect('Estados de pedidos', estados, default=default_estados,
+                                           key='comercial_estados')
+        filtrado = datos[
+            datos['fecha_arg'].between(desde, hasta) &
+            datos['vendedor'].isin(seleccion_vendedores) &
+            datos['estado'].isin(seleccion_estados)
+        ].copy()
+        if filtrado.empty:
+            st.info('No hay ventas para los filtros seleccionados.')
+        else:
+            filtrado['venta_bruta'] = pd.to_numeric(filtrado['venta_bruta'], errors='coerce').fillna(0)
+            filtrado['venta_neta'] = pd.to_numeric(filtrado['venta_neta'], errors='coerce').fillna(0)
+            filtrado['bultos'] = pd.to_numeric(filtrado['bultos'], errors='coerce').fillna(0).astype(int)
+            total_ventas = float(filtrado['venta_neta'].sum())
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric('Venta neta de pedidos', f'$ {total_ventas:,.2f}')
+            k2.metric('Bultos', f'{int(filtrado["bultos"].sum()):,}')
+            k3.metric('Pedidos', len(filtrado))
+            k4.metric('Clientes distintos', filtrado['cliente_codigo'].nunique())
+            por_vendedor = (filtrado.groupby('vendedor', as_index=False)
+                .agg(pedidos=('pedido', 'nunique'), clientes=('cliente_codigo', 'nunique'),
+                     bultos=('bultos', 'sum'), venta_bruta=('venta_bruta', 'sum'),
+                     venta_neta=('venta_neta', 'sum'))
+                .sort_values('venta_neta', ascending=False))
+            por_vendedor['participacion_pct'] = (por_vendedor['venta_neta'] / total_ventas * 100).round(2) if total_ventas else 0.0
+            st.subheader('Ranking de vendedores')
+            st.dataframe(por_vendedor, hide_index=True, width='stretch',
+                column_config={'venta_bruta': st.column_config.NumberColumn('Venta bruta ($)', format='%.2f'),
+                               'venta_neta': st.column_config.NumberColumn('Venta neta ($)', format='%.2f'),
+                               'participacion_pct': st.column_config.NumberColumn('Participación (%)', format='%.2f')})
+            st.bar_chart(por_vendedor.set_index('vendedor')['venta_neta'])
+            por_cliente = (filtrado.groupby(['cliente_codigo', 'cliente_nombre'], as_index=False)
+                .agg(pedidos=('pedido', 'nunique'), bultos=('bultos', 'sum'),
+                     venta_neta=('venta_neta', 'sum'))
+                .sort_values('venta_neta', ascending=False))
+            st.subheader('Ventas por cliente')
+            st.dataframe(por_cliente, hide_index=True, width='stretch')
+            st.subheader('Detalle de pedidos')
+            detalle_reporte = filtrado[['pedido', 'fecha_arg', 'cliente_codigo', 'cliente_nombre',
+                'vendedor', 'lista', 'estado', 'bultos', 'descuento_pct',
+                'venta_bruta', 'venta_neta']].copy()
+            st.dataframe(detalle_reporte, hide_index=True, width='stretch')
+            st.download_button('⬇️ Descargar informe comercial (Excel)',
+                data=excel_bytes({'Ventas por vendedor': por_vendedor,
+                                  'Ventas por cliente': por_cliente,
+                                  'Detalle pedidos': detalle_reporte}),
+                file_name=f'informe_comercial_{desde:%Y%m%d}_{hasta:%Y%m%d}.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                type='primary')
+
+elif page == 'Usuarios' and st.session_state.role == 'admin':
     st.header('Administración de usuarios')
-    st.caption('Solo administradores pueden crear, desactivar y cambiar contraseñas de vendedores.')
+    st.caption('Solo el administrador principal puede gestionar vendedores y Admin1.')
     if not remote_config():
         st.warning('Para activar esta sección primero hay que conectar una base compartida. Seguí las instrucciones de INSTALACION_USUARIOS.md. El administrador actual sigue entrando por Secrets.')
     else:
@@ -792,11 +972,12 @@ elif page == 'Usuarios':
             registered = remote_users()
             st.dataframe(pd.DataFrame([{'Usuario':u['username'],'Nombre':u['name'],'Rol':u['role'],'Activo':u['active']} for u in registered]), hide_index=True, use_container_width=True)
             with st.form('create_user', clear_on_submit=True):
-                st.subheader('Crear vendedor')
+                st.subheader('Crear usuario')
+                new_role = st.selectbox('Perfil', ['vendedor', 'admin1'], format_func=lambda x: 'Vendedor' if x == 'vendedor' else 'Admin1 · Solo informes')
                 new_name = st.text_input('Nombre y apellido')
                 new_username = st.text_input('Usuario (sin espacios)')
                 new_password = st.text_input('Contraseña inicial', type='password')
-                create = st.form_submit_button('Crear vendedor', type='primary')
+                create = st.form_submit_button('Aceptar y crear usuario', type='primary')
             if create:
                 un = new_username.strip().lower()
                 if not un or not un.replace('_','').isalnum() or not new_name.strip():
@@ -806,19 +987,19 @@ elif page == 'Usuarios':
                 elif any(u['username'] == un for u in registered) or un == 'admin':
                     st.error('Ese usuario ya existe.')
                 else:
-                    remote_users('POST', data={'username':un,'name':new_name.strip(),'role':'vendedor','active':True,'password_hash':hash_password(new_password)})
-                    st.success('Vendedor creado. Ya puede ingresar desde la pantalla principal.')
+                    remote_users('POST', data={'username':un,'name':new_name.strip(),'role':new_role,'active':True,'password_hash':hash_password(new_password)})
+                    st.success('Usuario creado. Ya puede ingresar desde la pantalla principal.')
                     st.rerun()
             st.divider()
-            sellers = [u for u in registered if u['role'] == 'vendedor']
+            sellers = [u for u in registered if u['role'] in ('vendedor', 'admin1')]
             if sellers:
-                chosen = st.selectbox('Administrar vendedor', [u['username'] for u in sellers])
+                chosen = st.selectbox('Administrar usuario', [u['username'] for u in sellers])
                 current = next(u for u in sellers if u['username'] == chosen)
                 if st.button('Desactivar usuario' if current['active'] else 'Reactivar usuario'):
                     remote_users('PATCH', chosen, {'active':not current['active']})
                     st.rerun()
                 with st.form('reset_password'):
-                    new_pass = st.text_input('Nueva contraseña para este vendedor',type='password')
+                    new_pass = st.text_input('Nueva contraseña para este usuario',type='password')
                     change = st.form_submit_button('Cambiar contraseña')
                 if change:
                     if len(new_pass)<12:
@@ -829,14 +1010,22 @@ elif page == 'Usuarios':
         except RuntimeError as exc:
             st.error(str(exc))
 
-else:
+elif page == 'Administración' and st.session_state.role == 'admin':
     st.header('Administración de catálogos')
     st.info('Clientes, artículos y pedidos se guardan en Supabase. Importar Excel actualiza solo los registros con diferencias.')
-    formulario_alta_cliente('administracion')
-    st.divider()
-    if st.session_state.get('articulo_creado_mensaje'):
-        st.success(st.session_state.pop('articulo_creado_mensaje'))
-    formulario_alta_articulo()
+    st.caption('Los formularios permiten confirmar con el botón Aceptar o con Enter '
+               'desde un campo de texto. En campos numéricos, usá el botón Aceptar para confirmar.')
+    tab_clientes, tab_articulos = st.tabs(['Clientes', 'Artículos y precios'])
+    with tab_clientes:
+        formulario_alta_cliente('administracion')
+        st.divider()
+        formulario_editar_cliente()
+    with tab_articulos:
+        if st.session_state.get('articulo_creado_mensaje'):
+            st.success(st.session_state.pop('articulo_creado_mensaje'))
+        formulario_alta_articulo()
+        st.divider()
+        formulario_editar_articulo()
     st.divider()
     st.subheader('Importación por Excel (opción existente)')
     for kind, title, cols in [('clientes','Clientes',['codigo','nombre']),('articulos','Artículos',['codigo','nombre','precio_1','precio_2','precio_3'])]:
