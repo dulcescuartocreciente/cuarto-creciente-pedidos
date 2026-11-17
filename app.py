@@ -833,85 +833,117 @@ elif page == 'Exportar Excel' and st.session_state.role == 'admin':
             st.download_button('⬇️ Descargar Excel de pedidos',data=data,file_name=f'pedidos_cuarto_creciente_{datetime.now(TZ):%Y%m%d_%H%M}.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',type='primary')
             st.divider()
             st.subheader('📦 Excel para Distribuidor')
-            st.caption('Archivo independiente: CODIGO, DESCRIPCION, CANTIDAD y CLIENTE. Suma bultos del mismo artículo por cliente.')
-            expedicion = dff[['cliente_codigo', 'cliente_nombre', 'articulo_codigo', 'articulo_nombre', 'bultos']].copy()
-            expedicion['cliente_codigo'] = expedicion['cliente_codigo'].astype(str)
-            expedicion['articulo_codigo'] = expedicion['articulo_codigo'].astype(str)
-            expedicion['bultos'] = pd.to_numeric(expedicion['bultos'], errors='raise').astype(int)
-            # Agrupar por códigos, para evitar mezclar clientes con el mismo nombre.
-            expedicion = (expedicion.groupby(['cliente_codigo', 'articulo_codigo'], as_index=False, sort=False)
-                          .agg({'cliente_nombre': 'first', 'articulo_nombre': 'first', 'bultos': 'sum'}))
-            expedicion = expedicion.rename(columns={
-                'articulo_codigo': 'CODIGO', 'articulo_nombre': 'DESCRIPCION',
-                'bultos': 'CANTIDAD', 'cliente_nombre': 'CLIENTE'})
-            expedicion = expedicion[['CODIGO', 'DESCRIPCION', 'CANTIDAD', 'CLIENTE']]
-            expedicion = expedicion.sort_values(['CLIENTE', 'CODIGO'], kind='stable').reset_index(drop=True)
-            st.dataframe(expedicion, use_container_width=True, hide_index=True)
-            # Facturación independiente de la matriz y del archivo de logística.
-            # Ambas descargas usan exactamente los mismos pedidos/estados filtrados.
-            facturacion = dff[[
-                'pedido', 'fecha', 'cliente_codigo', 'cliente_nombre', 'vendedor',
-                'lista', 'estado', 'articulo_codigo', 'articulo_nombre', 'bultos',
-                'precio', 'importe_bruto', 'descuento_pct', 'pct_comun', 'pct_x',
-                'observaciones'
-            ]].copy()
-            for campo in ('precio', 'importe_bruto', 'descuento_pct', 'pct_comun', 'pct_x'):
-                facturacion[campo] = pd.to_numeric(facturacion[campo], errors='coerce').fillna(0.0)
-            facturacion['importe_neto'] = (
-                facturacion['importe_bruto'] * (1 - facturacion['descuento_pct'] / 100)
-            ).round(2)
-            facturacion['importe_factura_comun'] = (
-                facturacion['importe_neto'] * facturacion['pct_comun'] / 100
-            ).round(2)
-            facturacion['importe_factura_x'] = (
-                facturacion['importe_neto'] - facturacion['importe_factura_comun']
-            ).round(2)
-            facturacion = facturacion.rename(columns={
-                'pedido': 'PEDIDO', 'fecha': 'FECHA',
-                'cliente_codigo': 'CODIGO CLIENTE', 'cliente_nombre': 'CLIENTE',
-                'vendedor': 'VENDEDOR', 'lista': 'LISTA', 'estado': 'ESTADO',
-                'articulo_codigo': 'CODIGO ARTICULO', 'articulo_nombre': 'ARTICULO',
-                'bultos': 'BULTOS', 'precio': 'PRECIO UNITARIO',
-                'importe_bruto': 'SUBTOTAL', 'descuento_pct': 'DESCUENTO %',
-                'pct_comun': 'FACTURA COMUN %', 'pct_x': 'FACTURA X %',
-                'observaciones': 'OBSERVACIONES', 'importe_neto': 'TOTAL NETO',
-                'importe_factura_comun': 'IMPORTE FACTURA COMUN',
-                'importe_factura_x': 'IMPORTE FACTURA X'
-            })
-            facturacion = facturacion[[
-                'PEDIDO', 'FECHA', 'CODIGO CLIENTE', 'CLIENTE', 'VENDEDOR',
-                'LISTA', 'ESTADO', 'CODIGO ARTICULO', 'ARTICULO', 'BULTOS',
-                'PRECIO UNITARIO', 'SUBTOTAL', 'DESCUENTO %', 'TOTAL NETO',
-                'FACTURA COMUN %', 'IMPORTE FACTURA COMUN', 'FACTURA X %',
-                'IMPORTE FACTURA X', 'OBSERVACIONES'
-            ]]
-            resumen_facturacion = facturacion.groupby(
-                ['PEDIDO', 'FECHA', 'CODIGO CLIENTE', 'CLIENTE', 'VENDEDOR',
-                 'LISTA', 'ESTADO', 'DESCUENTO %', 'FACTURA COMUN %',
-                 'FACTURA X %', 'OBSERVACIONES'],
-                as_index=False, dropna=False, sort=False
-            ).agg({
-                'BULTOS': 'sum', 'SUBTOTAL': 'sum', 'TOTAL NETO': 'sum',
-                'IMPORTE FACTURA COMUN': 'sum', 'IMPORTE FACTURA X': 'sum'
-            })
-            st.subheader('🧾 Facturación para despacho')
-            st.caption('Detalle por pedido y artículo, con precios, descuento, distribución de facturación y observaciones. Incluye resumen por pedido.')
-            st.dataframe(resumen_facturacion, use_container_width=True, hide_index=True)
-            col_distribuidor, col_facturacion = st.columns(2)
-            with col_distribuidor:
-                st.download_button('⬇️ Excel para Distribuidor',
-                    data=excel_bytes({'Distribuidor': expedicion}),
-                    file_name=f'distribuidor_cuarto_creciente_{datetime.now(TZ):%Y%m%d_%H%M}.xlsx',
-                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                    type='primary', key='descargar_expedicion', use_container_width=True)
-            with col_facturacion:
-                st.download_button('⬇️ Excel de Facturación',
-                    data=excel_bytes({'Detalle facturacion': facturacion,
-                                      'Resumen por pedido': resumen_facturacion}),
-                    file_name=f'facturacion_despacho_{datetime.now(TZ):%Y%m%d_%H%M}.xlsx',
-                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                    type='primary', key='descargar_facturacion', use_container_width=True)
-            st.caption('La descarga completa se mantiene separada. Los pedidos cancelados solo se incluyen si los seleccionás.')
+            st.caption('Seleccioná los clientes que querés incluir en las descargas de Distribuidor y Facturación. '
+                       'Las demás exportaciones generales no se modifican.')
+            clientes_exportacion = (dff[['cliente_codigo', 'cliente_nombre']]
+                                    .drop_duplicates(subset=['cliente_codigo'])
+                                    .sort_values(['cliente_nombre', 'cliente_codigo']))
+            opciones_clientes = clientes_exportacion['cliente_codigo'].astype(str).tolist()
+            nombres_clientes = dict(zip(clientes_exportacion['cliente_codigo'].astype(str),
+                                        clientes_exportacion['cliente_nombre'].astype(str)))
+            seleccion_clientes = st.multiselect(
+                'Clientes a incluir en la facturación / distribuidor',
+                options=opciones_clientes,
+                default=[],
+                format_func=lambda codigo: f'{nombres_clientes[codigo]} ({codigo})',
+                placeholder='Elegí uno o varios clientes',
+                key='clientes_facturacion_distribuidor')
+            c_sel1, c_sel2 = st.columns(2)
+            with c_sel1:
+                if st.button('Seleccionar todos los clientes', key='seleccionar_todos_facturacion'):
+                    st.session_state['clientes_facturacion_distribuidor'] = opciones_clientes
+                    st.rerun()
+            with c_sel2:
+                if st.button('Limpiar selección', key='limpiar_clientes_facturacion'):
+                    st.session_state['clientes_facturacion_distribuidor'] = []
+                    st.rerun()
+            dff_export = dff[dff['cliente_codigo'].astype(str).isin(seleccion_clientes)].copy()
+            st.caption(f'{len(seleccion_clientes)} clientes seleccionados · '
+                       f'{dff_export["pedido"].nunique()} pedidos · '
+                       f'{int(dff_export["bultos"].sum())} bultos.')
+            if dff_export.empty:
+                st.info('Seleccioná al menos un cliente para habilitar las descargas de Distribuidor y Facturación.')
+            else:
+
+                st.caption('Archivo independiente: CODIGO, DESCRIPCION, CANTIDAD y CLIENTE. Suma bultos del mismo artículo por cliente.')
+                expedicion = dff_export[['cliente_codigo', 'cliente_nombre', 'articulo_codigo', 'articulo_nombre', 'bultos']].copy()
+                expedicion['cliente_codigo'] = expedicion['cliente_codigo'].astype(str)
+                expedicion['articulo_codigo'] = expedicion['articulo_codigo'].astype(str)
+                expedicion['bultos'] = pd.to_numeric(expedicion['bultos'], errors='raise').astype(int)
+                # Agrupar por códigos, para evitar mezclar clientes con el mismo nombre.
+                expedicion = (expedicion.groupby(['cliente_codigo', 'articulo_codigo'], as_index=False, sort=False)
+                              .agg({'cliente_nombre': 'first', 'articulo_nombre': 'first', 'bultos': 'sum'}))
+                expedicion = expedicion.rename(columns={
+                    'articulo_codigo': 'CODIGO', 'articulo_nombre': 'DESCRIPCION',
+                    'bultos': 'CANTIDAD', 'cliente_nombre': 'CLIENTE'})
+                expedicion = expedicion[['CODIGO', 'DESCRIPCION', 'CANTIDAD', 'CLIENTE']]
+                expedicion = expedicion.sort_values(['CLIENTE', 'CODIGO'], kind='stable').reset_index(drop=True)
+                st.dataframe(expedicion, use_container_width=True, hide_index=True)
+                # Facturación independiente de la matriz y del archivo de logística.
+                # Ambas descargas usan exactamente los mismos pedidos/estados filtrados.
+                facturacion = dff_export[[
+                    'pedido', 'fecha', 'cliente_codigo', 'cliente_nombre', 'vendedor',
+                    'lista', 'estado', 'articulo_codigo', 'articulo_nombre', 'bultos',
+                    'precio', 'importe_bruto', 'descuento_pct', 'pct_comun', 'pct_x',
+                    'observaciones'
+                ]].copy()
+                for campo in ('precio', 'importe_bruto', 'descuento_pct', 'pct_comun', 'pct_x'):
+                    facturacion[campo] = pd.to_numeric(facturacion[campo], errors='coerce').fillna(0.0)
+                facturacion['importe_neto'] = (
+                    facturacion['importe_bruto'] * (1 - facturacion['descuento_pct'] / 100)
+                ).round(2)
+                facturacion['importe_factura_comun'] = (
+                    facturacion['importe_neto'] * facturacion['pct_comun'] / 100
+                ).round(2)
+                facturacion['importe_factura_x'] = (
+                    facturacion['importe_neto'] - facturacion['importe_factura_comun']
+                ).round(2)
+                facturacion = facturacion.rename(columns={
+                    'pedido': 'PEDIDO', 'fecha': 'FECHA',
+                    'cliente_codigo': 'CODIGO CLIENTE', 'cliente_nombre': 'CLIENTE',
+                    'vendedor': 'VENDEDOR', 'lista': 'LISTA', 'estado': 'ESTADO',
+                    'articulo_codigo': 'CODIGO ARTICULO', 'articulo_nombre': 'ARTICULO',
+                    'bultos': 'BULTOS', 'precio': 'PRECIO UNITARIO',
+                    'importe_bruto': 'SUBTOTAL', 'descuento_pct': 'DESCUENTO %',
+                    'pct_comun': 'FACTURA COMUN %', 'pct_x': 'FACTURA X %',
+                    'observaciones': 'OBSERVACIONES', 'importe_neto': 'TOTAL NETO',
+                    'importe_factura_comun': 'IMPORTE FACTURA COMUN',
+                    'importe_factura_x': 'IMPORTE FACTURA X'
+                })
+                facturacion = facturacion[[
+                    'PEDIDO', 'FECHA', 'CODIGO CLIENTE', 'CLIENTE', 'VENDEDOR',
+                    'LISTA', 'ESTADO', 'CODIGO ARTICULO', 'ARTICULO', 'BULTOS',
+                    'PRECIO UNITARIO', 'SUBTOTAL', 'DESCUENTO %', 'TOTAL NETO',
+                    'FACTURA COMUN %', 'IMPORTE FACTURA COMUN', 'FACTURA X %',
+                    'IMPORTE FACTURA X', 'OBSERVACIONES'
+                ]]
+                resumen_facturacion = facturacion.groupby(
+                    ['PEDIDO', 'FECHA', 'CODIGO CLIENTE', 'CLIENTE', 'VENDEDOR',
+                     'LISTA', 'ESTADO', 'DESCUENTO %', 'FACTURA COMUN %',
+                     'FACTURA X %', 'OBSERVACIONES'],
+                    as_index=False, dropna=False, sort=False
+                ).agg({
+                    'BULTOS': 'sum', 'SUBTOTAL': 'sum', 'TOTAL NETO': 'sum',
+                    'IMPORTE FACTURA COMUN': 'sum', 'IMPORTE FACTURA X': 'sum'
+                })
+                st.subheader('🧾 Facturación para despacho')
+                st.caption('Detalle por pedido y artículo, con precios, descuento, distribución de facturación y observaciones. Incluye resumen por pedido.')
+                st.dataframe(resumen_facturacion, use_container_width=True, hide_index=True)
+                col_distribuidor, col_facturacion = st.columns(2)
+                with col_distribuidor:
+                    st.download_button('⬇️ Excel para Distribuidor',
+                        data=excel_bytes({'Distribuidor': expedicion}),
+                        file_name=f'distribuidor_cuarto_creciente_{datetime.now(TZ):%Y%m%d_%H%M}.xlsx',
+                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        type='primary', key='descargar_expedicion', use_container_width=True)
+                with col_facturacion:
+                    st.download_button('⬇️ Excel de Facturación',
+                        data=excel_bytes({'Detalle facturacion': facturacion,
+                                          'Resumen por pedido': resumen_facturacion}),
+                        file_name=f'facturacion_despacho_{datetime.now(TZ):%Y%m%d_%H%M}.xlsx',
+                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        type='primary', key='descargar_facturacion', use_container_width=True)
+                st.caption('La descarga completa se mantiene separada. Los pedidos cancelados solo se incluyen si los seleccionás.')
 
 
 elif page == 'Informes comerciales' and st.session_state.role in ('admin', 'admin1'):
