@@ -141,6 +141,7 @@ def login():
                     st.error('No se pudo consultar Supabase para ingresar como vendedor. El administrador puede ingresar normalmente.')
                     return False
             if user and check_password(password, user.get('password_hash', '')) and user.get('role') in ('admin', 'vendedor', 'admin1'):
+                st.session_state.informes_comerciales_autorizado = False
                 st.session_state.authenticated = True
                 st.session_state.username = username
                 st.session_state.role = user['role']
@@ -879,6 +880,31 @@ elif page == 'Exportar Excel' and st.session_state.role == 'admin':
 
 
 elif page == 'Informes comerciales' and st.session_state.role in ('admin', 'admin1'):
+    # Segunda barrera de acceso: no se consulta ni muestra ningún informe antes de validarla.
+    try:
+        clave_informes = str(st.secrets.get('INFORMES_COMERCIALES_PASSWORD', ''))
+    except (KeyError, FileNotFoundError):
+        clave_informes = ''
+    if len(clave_informes) < 12:
+        st.error('Informes comerciales bloqueados: configurá INFORMES_COMERCIALES_PASSWORD '
+                 'con al menos 12 caracteres en Streamlit Cloud → App settings → Secrets.')
+        st.stop()
+    if not st.session_state.get('informes_comerciales_autorizado', False):
+        st.header('🔒 Acceso a informes comerciales')
+        st.info('Ingresá la contraseña adicional para consultar ventas y comisiones.')
+        with st.form('acceso_informes_comerciales', clear_on_submit=True):
+            clave_ingresada = st.text_input('Contraseña de informes', type='password')
+            aceptar = st.form_submit_button('Aceptar e ingresar', type='primary')
+        if aceptar:
+            if hmac.compare_digest(clave_ingresada.encode('utf-8'), clave_informes.encode('utf-8')):
+                st.session_state.informes_comerciales_autorizado = True
+                st.rerun()
+            else:
+                st.error('Contraseña incorrecta.')
+        st.stop()
+    if st.button('🔒 Bloquear informes comerciales', key='bloquear_informes'):
+        st.session_state.informes_comerciales_autorizado = False
+        st.rerun()
     st.header('📊 Informes comerciales · Ventas por vendedor')
     st.caption('Ventas registradas por pedidos, calculadas a precios históricos y con descuento comercial. '
                'No representan facturas emitidas ni entregas efectivas.')
