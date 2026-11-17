@@ -925,22 +925,35 @@ elif page == 'Informes comerciales' and st.session_state.role in ('admin', 'admi
             filtrado['venta_bruta'] = pd.to_numeric(filtrado['venta_bruta'], errors='coerce').fillna(0)
             filtrado['venta_neta'] = pd.to_numeric(filtrado['venta_neta'], errors='coerce').fillna(0)
             filtrado['bultos'] = pd.to_numeric(filtrado['bultos'], errors='coerce').fillna(0).astype(int)
+            # Comisión comercial fija del 6% sobre venta neta, luego del descuento.
+            # Se calcula por pedido y se redondea a centavos para facilitar auditoría.
+            TASA_COMISION = 0.06
+            filtrado['comision_pct'] = TASA_COMISION * 100
+            filtrado['comision'] = (filtrado['venta_neta'] * TASA_COMISION).round(2)
             total_ventas = float(filtrado['venta_neta'].sum())
-            k1, k2, k3, k4 = st.columns(4)
+            total_comisiones = float(filtrado['comision'].sum())
+            k1, k2, k3, k4, k5 = st.columns(5)
             k1.metric('Venta neta de pedidos', f'$ {total_ventas:,.2f}')
-            k2.metric('Bultos', f'{int(filtrado["bultos"].sum()):,}')
-            k3.metric('Pedidos', len(filtrado))
-            k4.metric('Clientes distintos', filtrado['cliente_codigo'].nunique())
+            k2.metric('Comisiones (6%)', f'$ {total_comisiones:,.2f}')
+            k3.metric('Bultos', f'{int(filtrado["bultos"].sum()):,}')
+            k4.metric('Pedidos', len(filtrado))
+            k5.metric('Clientes distintos', filtrado['cliente_codigo'].nunique())
+            st.caption('Comisión = 6% de la venta neta de cada pedido, después del descuento comercial. '
+                       'Los pedidos cancelados están excluidos por defecto; los importes no acreditan cobro ni entrega.')
             por_vendedor = (filtrado.groupby('vendedor', as_index=False)
                 .agg(pedidos=('pedido', 'nunique'), clientes=('cliente_codigo', 'nunique'),
                      bultos=('bultos', 'sum'), venta_bruta=('venta_bruta', 'sum'),
-                     venta_neta=('venta_neta', 'sum'))
+                     venta_neta=('venta_neta', 'sum'),
+                     comision=('comision', 'sum'))
                 .sort_values('venta_neta', ascending=False))
+            por_vendedor['comision_pct'] = TASA_COMISION * 100
             por_vendedor['participacion_pct'] = (por_vendedor['venta_neta'] / total_ventas * 100).round(2) if total_ventas else 0.0
             st.subheader('Ranking de vendedores')
             st.dataframe(por_vendedor, hide_index=True, width='stretch',
                 column_config={'venta_bruta': st.column_config.NumberColumn('Venta bruta ($)', format='%.2f'),
                                'venta_neta': st.column_config.NumberColumn('Venta neta ($)', format='%.2f'),
+                               'comision': st.column_config.NumberColumn('Comisión 6% ($)', format='%.2f'),
+                               'comision_pct': st.column_config.NumberColumn('Tasa comisión (%)', format='%.2f'),
                                'participacion_pct': st.column_config.NumberColumn('Participación (%)', format='%.2f')})
             st.bar_chart(por_vendedor.set_index('vendedor')['venta_neta'])
             por_cliente = (filtrado.groupby(['cliente_codigo', 'cliente_nombre'], as_index=False)
@@ -952,10 +965,13 @@ elif page == 'Informes comerciales' and st.session_state.role in ('admin', 'admi
             st.subheader('Detalle de pedidos')
             detalle_reporte = filtrado[['pedido', 'fecha_arg', 'cliente_codigo', 'cliente_nombre',
                 'vendedor', 'lista', 'estado', 'bultos', 'descuento_pct',
-                'venta_bruta', 'venta_neta']].copy()
+                'venta_bruta', 'venta_neta', 'comision_pct', 'comision']].copy()
             st.dataframe(detalle_reporte, hide_index=True, width='stretch')
             st.download_button('⬇️ Descargar informe comercial (Excel)',
                 data=excel_bytes({'Ventas por vendedor': por_vendedor,
+                                  'Comisiones vendedores': por_vendedor[
+                                      ['vendedor', 'pedidos', 'venta_neta', 'comision_pct', 'comision']
+                                  ].copy(),
                                   'Ventas por cliente': por_cliente,
                                   'Detalle pedidos': detalle_reporte}),
                 file_name=f'informe_comercial_{desde:%Y%m%d}_{hasta:%Y%m%d}.xlsx',
